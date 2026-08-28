@@ -25,6 +25,7 @@ type Variant = {
   id: number;
   product_id: number;
   name: string;
+  package_quantity: number;
   default_price: number;
   products?: Product;
 };
@@ -59,6 +60,15 @@ const today = () =>
     new Date(),
   );
 
+const unitLabel = (variant: Pick<Variant, "package_quantity">) =>
+  variant.package_quantity === 1 ? "1 pc" : `${variant.package_quantity} pcs`;
+const stockLabel = (
+  quantity: number,
+  variant: Pick<Variant, "package_quantity">,
+) =>
+  variant.package_quantity === 1
+    ? `${quantity} pcs`
+    : `${quantity} ${quantity === 1 ? "pack" : "packs"} (${quantity * variant.package_quantity} pcs)`;
 function Auth() {
   const [signup, setSignup] = useState(false),
     [email, setEmail] = useState(""),
@@ -153,7 +163,7 @@ function Setup({ userId, onDone }: { userId: string; onDone: () => void }) {
         <Logo />
         <h1>Set up your shop</h1>
         <p>Create a shop, or join using the invite code.</p>
-        <form>
+        <form onSubmit={(e) => e.preventDefault()}>
           <label>
             Shop name
             <input value={name} onChange={(e) => setName(e.target.value)} />
@@ -231,7 +241,7 @@ function StartDay({
       <Heading
         label="Good morning"
         title="What did you bring?"
-        text="Enter today’s starting quantity."
+        text="Enter today's starting quantity by selling unit."
       />
       <div className="card">
         {variants.map((v) => (
@@ -239,7 +249,7 @@ function StartDay({
             <div>
               <b>{v.products?.name}</b>
               <span>
-                {v.name} · {php.format(v.default_price)}
+                {v.name} · {unitLabel(v)} · {php.format(v.default_price)}
               </span>
             </div>
             <Stepper
@@ -341,6 +351,22 @@ function Sell({
           },
     }));
   }
+  function decrease(s: Stock) {
+    const v = s.product_variants;
+    setCart((c) => {
+      const item = c[v.id];
+      if (!item) return c;
+      if (item.quantity <= 1) {
+        const next = { ...c };
+        delete next[v.id];
+        return next;
+      }
+      return {
+        ...c,
+        [v.id]: { ...item, quantity: item.quantity - 1 },
+      };
+    });
+  }
   async function save() {
     if (!supabase) return;
     if (!walkIn && !name.trim()) return setError("Enter a customer name.");
@@ -369,25 +395,45 @@ function Sell({
   }
   return (
     <section>
-      <Heading label="Today" title="New sale" text="Tap a product to add it." />
+      <Heading label="Today" title="New sale" text="Use + or - to adjust items." />
       <div className="grid">
         {stock.map((s) => {
-          const v = s.product_variants;
+          const v = s.product_variants,
+            picked = cart[v.id]?.quantity || 0,
+            remaining = Math.max(0, s.brought_quantity - picked),
+            label = `${v.products?.name || "Product"} ${v.name}`;
           return (
-            <button
-              className="product"
+            <article
+              className={`product ${!s.brought_quantity ? "disabled" : ""}`}
               key={s.id}
-              disabled={!s.brought_quantity}
-              onClick={() => add(s)}
             >
               <i>{v.products?.name.slice(0, 1)}</i>
               <b>{v.products?.name}</b>
-              <span>{v.name}</span>
+              <span>{v.name} · {unitLabel(v)}</span>
               <small>
-                {php.format(v.default_price)} · {s.brought_quantity} left
+                {php.format(v.default_price)} · {stockLabel(remaining, v)} left
               </small>
-              {cart[v.id] && <em>{cart[v.id].quantity}</em>}
-            </button>
+              {picked > 0 && <em>{picked}</em>}
+              <div className="product-actions" aria-label={`${label} quantity`}>
+                <button
+                  type="button"
+                  disabled={!picked}
+                  onClick={() => decrease(s)}
+                  aria-label={`Decrease ${label}`}
+                >
+                  <Minus />
+                </button>
+                <span>{picked}</span>
+                <button
+                  type="button"
+                  disabled={!remaining}
+                  onClick={() => add(s)}
+                  aria-label={`Add ${label}`}
+                >
+                  <Plus />
+                </button>
+              </div>
+            </article>
           );
         })}
       </div>
@@ -410,7 +456,7 @@ function Sell({
               <div className="row" key={l.variant.id}>
                 <div>
                   <b>
-                    {l.variant.products?.name} · {l.variant.name}
+                    {l.variant.products?.name} · {l.variant.name} · {unitLabel(l.variant)}
                   </b>
                   <label>
                     Price
@@ -523,10 +569,20 @@ function StockPage({
   const [open, setOpen] = useState(false),
     [product, setProduct] = useState(""),
     [variant, setVariant] = useState(""),
+    [packageQty, setPackageQty] = useState("1"),
     [price, setPrice] = useState(""),
     [error, setError] = useState("");
   async function add() {
     if (!supabase) return;
+    setError("");
+    if (!product.trim() || !variant.trim())
+      return setError("Enter the product and flavor.");
+    const parsedPackageQty = Number(packageQty);
+    if (!Number.isInteger(parsedPackageQty) || parsedPackageQty < 1)
+      return setError("Enter pieces per selling unit.");
+    const parsedPrice = Number(price);
+    if (!Number.isFinite(parsedPrice) || parsedPrice < 0)
+      return setError("Enter a valid price.");
     let id: number;
     const found = await supabase
       .from("products")
@@ -548,11 +604,16 @@ function StockPage({
       business_id: business.id,
       product_id: id,
       name: variant.trim(),
-      default_price: Number(price),
+      package_quantity: parsedPackageQty,
+      default_price: parsedPrice,
     });
     if (r.error) setError(r.error.message);
     else {
       setOpen(false);
+      setProduct("");
+      setVariant("");
+      setPackageQty("1");
+      setPrice("");
       reload();
     }
   }
@@ -574,9 +635,9 @@ function StockPage({
             <div className="row" key={s.id}>
               <div>
                 <b>{s.product_variants.products?.name}</b>
-                <span>{s.product_variants.name}</span>
+                <span>{s.product_variants.name} · {unitLabel(s.product_variants)}</span>
               </div>
-              <strong>{s.brought_quantity} left</strong>
+              <strong>{stockLabel(s.brought_quantity, s.product_variants)} left</strong>
             </div>
           ))}
         </div>
@@ -617,7 +678,17 @@ function StockPage({
               />
             </label>
             <label>
-              Usual price
+              Pieces per selling unit
+              <input
+                inputMode="numeric"
+                pattern="[0-9]*"
+                value={packageQty}
+                onChange={(e) => setPackageQty(e.target.value)}
+                placeholder="1"
+              />
+            </label>
+            <label>
+              Price per selling unit
               <input
                 inputMode="decimal"
                 value={price}
@@ -657,7 +728,8 @@ function Reports({ business, userId }: { business: Business; userId: string }) {
         .select("*")
         .eq("business_id", business.id)
         .gte("sold_at", `${today()}T00:00:00+08:00`)
-        .lte("sold_at", `${today()}T23:59:59+08:00`);
+        .lte("sold_at", `${today()}T23:59:59+08:00`)
+        .order("sold_at", { ascending: false });
     const { data } = await q;
     setSales((data || []) as Sale[]);
   }, [business.id, view]);
@@ -791,7 +863,7 @@ export default function App() {
       const [v, d] = await Promise.all([
         supabase
           .from("product_variants")
-          .select("id,product_id,name,default_price,products(id,name)")
+          .select("id,product_id,name,package_quantity,default_price,products(id,name)")
           .eq("business_id", b.id)
           .eq("is_active", true),
         supabase
@@ -808,7 +880,7 @@ export default function App() {
           supabase
             .from("daily_stock")
             .select(
-              "id,variant_id,brought_quantity,product_variants(id,product_id,name,default_price,products(id,name))",
+              "id,variant_id,brought_quantity,product_variants(id,product_id,name,package_quantity,default_price,products(id,name))",
             )
             .eq("selling_day_id", d.data.id),
           supabase
@@ -834,10 +906,12 @@ export default function App() {
           );
         const available = ((s.data || []) as unknown as Stock[]).map((row) => ({
           ...row,
-          brought_quantity:
+          brought_quantity: Math.max(
+            0,
             row.brought_quantity +
-            (adjustedByVariant.get(row.variant_id) || 0) -
-            (soldByVariant.get(row.variant_id) || 0),
+              (adjustedByVariant.get(row.variant_id) || 0) -
+              (soldByVariant.get(row.variant_id) || 0),
+          ),
         }));
         setStock(available);
       } else setStock([]);

@@ -21,8 +21,11 @@ body {
   min-height: 100dvh;
 }
 button,
-input {
+input,
+select,
+textarea {
   font: inherit;
+  font-size: 16px;
 }
 button {
   touch-action: manipulation;
@@ -274,7 +277,7 @@ input:focus {
   transform: scale(0.98);
   background: #fff2f7;
 }
-.product:disabled {
+.product.disabled {
   opacity: 0.45;
 }
 .product i {
@@ -312,6 +315,36 @@ input:focus {
   color: #fff;
   font-style: normal;
   font-size: 12px;
+}
+.product-actions {
+  width: 100%;
+  min-height: 42px;
+  display: grid;
+  grid-template-columns: 42px 1fr 42px;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+.product-actions button {
+  width: 42px;
+  height: 42px;
+  border: 0;
+  border-radius: 12px;
+  background: #f9e3ec;
+  color: #a52e60;
+  display: grid;
+  place-items: center;
+}
+.product-actions button:disabled {
+  opacity: 0.35;
+}
+.product-actions svg {
+  width: 17px;
+}
+.product-actions span {
+  text-align: center;
+  color: #704b59;
+  font-weight: 800;
 }
 .cart {
   height: 58px;
