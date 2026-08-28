@@ -27,6 +27,7 @@ type Variant = {
   name: string;
   package_quantity: number;
   default_price: number;
+  is_active?: boolean;
   products?: Product;
 };
 type Day = { id: number; sale_date: string };
@@ -50,6 +51,12 @@ type Sale = {
   total: number;
   payment_status: string;
   sold_at: string;
+};
+type CustomerBalance = {
+  customerId: number | null;
+  name: string;
+  total: number;
+  count: number;
 };
 const php = new Intl.NumberFormat("en-PH", {
   style: "currency",
@@ -559,10 +566,14 @@ function Sell({
 
 function StockPage({
   business,
+  day,
+  variants,
   stock,
   reload,
 }: {
   business: Business;
+  day: Day | null;
+  variants: Variant[];
   stock: Stock[];
   reload: () => void;
 }) {
@@ -571,11 +582,19 @@ function StockPage({
     [variant, setVariant] = useState(""),
     [packageQty, setPackageQty] = useState("1"),
     [price, setPrice] = useState(""),
+    [todayQty, setTodayQty] = useState("0"),
+    [addQty, setAddQty] = useState<Record<number, number>>({}),
     [error, setError] = useState("");
+  const stockedVariantIds = new Set(stock.map((item) => item.variant_id));
+  const missingToday = day
+    ? variants.filter((item) => !stockedVariantIds.has(item.id))
+    : [];
   async function add() {
     if (!supabase) return;
     setError("");
-    if (!product.trim() || !variant.trim())
+    const productName = product.trim(),
+      variantName = variant.trim();
+    if (!productName || !variantName)
       return setError("Enter the product and flavor.");
     const parsedPackageQty = Number(packageQty);
     if (!Number.isInteger(parsedPackageQty) || parsedPackageQty < 1)
@@ -583,39 +602,144 @@ function StockPage({
     const parsedPrice = Number(price);
     if (!Number.isFinite(parsedPrice) || parsedPrice < 0)
       return setError("Enter a valid price.");
+    const parsedTodayQty = Number(todayQty);
+    if (day && (!Number.isInteger(parsedTodayQty) || parsedTodayQty < 0))
+      return setError("Enter a whole number for today's quantity.");
+    if (
+      day &&
+      parsedTodayQty > 0 &&
+      !window.confirm(
+        `Save ${productName} ${variantName} and add ${stockLabel(parsedTodayQty, { package_quantity: parsedPackageQty })} to today?`,
+      )
+    )
+      return;
     let id: number;
     const found = await supabase
       .from("products")
       .select("id")
       .eq("business_id", business.id)
-      .ilike("name", product.trim())
+      .ilike("name", productName)
       .maybeSingle();
     if (found.data) id = found.data.id;
     else {
       const p = await supabase
         .from("products")
-        .insert({ business_id: business.id, name: product.trim() })
+        .insert({ business_id: business.id, name: productName })
         .select("id")
         .single();
       if (p.error) return setError(p.error.message);
       id = p.data.id;
     }
-    const r = await supabase.from("product_variants").insert({
+    const r = await supabase
+      .from("product_variants")
+      .insert({
+        business_id: business.id,
+        product_id: id,
+        name: variantName,
+        package_quantity: parsedPackageQty,
+        default_price: parsedPrice,
+      })
+      .select("id")
+      .single();
+    if (r.error) return setError(r.error.message);
+    if (day && parsedTodayQty > 0) {
+      const stockResult = await supabase.from("daily_stock").insert({
+        business_id: business.id,
+        selling_day_id: day.id,
+        variant_id: r.data.id,
+        brought_quantity: parsedTodayQty,
+      });
+      if (stockResult.error) return setError(stockResult.error.message);
+    }
+    setOpen(false);
+    setProduct("");
+    setVariant("");
+    setPackageQty("1");
+    setPrice("");
+    setTodayQty("0");
+    reload();
+  }
+  async function addToToday(variant: Variant) {
+    if (!supabase || !day) return;
+    setError("");
+    const quantity = addQty[variant.id] || 0;
+    if (quantity < 1) return setError("Choose quantity to add today.");
+    const label = `${variant.products?.name || "Product"} ${variant.name}`;
+    if (
+      !window.confirm(
+        `Add ${stockLabel(quantity, variant)} of ${label} to today's stock?`,
+      )
+    )
+      return;
+    const { error } = await supabase.from("daily_stock").insert({
       business_id: business.id,
-      product_id: id,
-      name: variant.trim(),
-      package_quantity: parsedPackageQty,
-      default_price: parsedPrice,
+      selling_day_id: day.id,
+      variant_id: variant.id,
+      brought_quantity: quantity,
     });
-    if (r.error) setError(r.error.message);
+    if (error) setError(error.message);
     else {
-      setOpen(false);
-      setProduct("");
-      setVariant("");
-      setPackageQty("1");
-      setPrice("");
+      setAddQty((current) => {
+        const next = { ...current };
+        delete next[variant.id];
+        return next;
+      });
       reload();
     }
+  }
+  async function removeFromToday(item: Stock) {
+    if (!supabase || !day) return;
+    setError("");
+    if (item.brought_quantity < 1) return setError("No remaining stock to remove.");
+    const variant = item.product_variants,
+      label = `${variant.products?.name || "Product"} ${variant.name}`;
+    if (
+      !window.confirm(
+        `Remove ${stockLabel(item.brought_quantity, variant)} of ${label} from today's stock? Sold items stay in reports.`,
+      )
+    )
+      return;
+    const { error } = await supabase.from("stock_adjustments").insert({
+      business_id: business.id,
+      selling_day_id: day.id,
+      variant_id: item.variant_id,
+      kind: "returned_home",
+      quantity_delta: -item.brought_quantity,
+      note: "Removed from today's stock",
+    });
+    if (error) setError(error.message);
+    else reload();
+  }
+  async function archiveVariant(variant: Variant, remaining = 0) {
+    if (!supabase) return;
+    setError("");
+    const label = `${variant.products?.name || "Product"} ${variant.name}`;
+    if (
+      !window.confirm(
+        `Remove ${label} from the product list? Existing sales stay in reports.`,
+      )
+    )
+      return;
+    const { error } = await supabase
+      .from("product_variants")
+      .update({ is_active: false })
+      .eq("id", variant.id)
+      .eq("business_id", business.id);
+    if (error) return setError(error.message);
+    if (day && remaining > 0) {
+      const { error: stockError } = await supabase
+        .from("stock_adjustments")
+        .insert({
+          business_id: business.id,
+          selling_day_id: day.id,
+          variant_id: variant.id,
+          kind: "returned_home",
+          quantity_delta: -remaining,
+          note: "Removed product from list",
+        });
+      if (stockError) setError(stockError.message);
+    }
+    reload();
   }
   return (
     <section>
@@ -623,7 +747,7 @@ function StockPage({
         <div>
           <p className="eyebrow">Inventory</p>
           <h1>Today’s stock</h1>
-          <span>Products still available.</span>
+          <span>{day ? "Add missed items anytime." : "Products still available."}</span>
         </div>
         <button className="icon" onClick={() => setOpen(true)}>
           <PackagePlus />
@@ -631,27 +755,87 @@ function StockPage({
       </div>
       {stock.length ? (
         <div className="card">
-          {stock.map((s) => (
-            <div className="row" key={s.id}>
-              <div>
-                <b>{s.product_variants.products?.name}</b>
-                <span>{s.product_variants.name} · {unitLabel(s.product_variants)}</span>
+          {stock.map((s) => {
+            const variant = s.product_variants;
+            return (
+              <div className="row" key={s.id}>
+                <div>
+                  <b>{variant.products?.name}</b>
+                  <span>
+                    {variant.name} · {unitLabel(variant)}
+                  </span>
+                </div>
+                <div className="stock-actions">
+                  <strong>{stockLabel(s.brought_quantity, variant)} left</strong>
+                  <button
+                    className="secondary danger compact"
+                    disabled={!day || s.brought_quantity < 1}
+                    onClick={() => removeFromToday(s)}
+                  >
+                    Remove today
+                  </button>
+                  <button
+                    className="link danger-link"
+                    onClick={() => archiveVariant(variant, s.brought_quantity)}
+                  >
+                    Remove product
+                  </button>
+                </div>
               </div>
-              <strong>{stockLabel(s.brought_quantity, s.product_variants)} left</strong>
-            </div>
-          ))}
+            );
+          })}
         </div>
       ) : (
         <Empty
           title="No stock yet"
-          text="Add products, then start today from Sell."
+          text={
+            day
+              ? "Add an item to today's stock."
+              : "Add products, then start today from Sell."
+          }
           action={
             <button className="secondary" onClick={() => setOpen(true)}>
               Add product
             </button>
           }
         />
-      )}{" "}
+      )}
+      {day && missingToday.length > 0 && (
+        <section className="block">
+          <Heading
+            label="Forgot something?"
+            title="Add to today"
+            text="Pick the quantity she brought."
+          />
+          <div className="card">
+            {missingToday.map((v) => (
+              <div className="row" key={v.id}>
+                <div>
+                  <b>{v.products?.name}</b>
+                  <span>
+                    {v.name} · {unitLabel(v)} · {php.format(v.default_price)}
+                  </span>
+                </div>
+                <div className="inline-stock">
+                  <Stepper
+                    value={addQty[v.id] || 0}
+                    set={(n) => setAddQty((x) => ({ ...x, [v.id]: n }))}
+                  />
+                  <button className="secondary" onClick={() => addToToday(v)}>
+                    Add
+                  </button>
+                  <button
+                    className="link danger-link"
+                    onClick={() => archiveVariant(v)}
+                  >
+                    Remove product
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
       {open && (
         <div className="backdrop">
           <div className="sheet">
@@ -696,6 +880,18 @@ function StockPage({
                 placeholder="₱ 0.00"
               />
             </label>
+            {day && (
+              <label>
+                Quantity for today
+                <input
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  value={todayQty}
+                  onChange={(e) => setTodayQty(e.target.value)}
+                  placeholder="0"
+                />
+              </label>
+            )}
             {error && <p className="error">{error}</p>}
             <button className="primary" onClick={add}>
               Save product
@@ -740,6 +936,23 @@ function Reports({ business, userId }: { business: Business; userId: string }) {
     () => sales.reduce((s, x) => s + Number(x.total), 0),
     [sales],
   );
+  const balances = useMemo<CustomerBalance[]>(() => {
+    const byCustomer = new Map<string, CustomerBalance>();
+    for (const sale of sales) {
+      const name = sale.customer_name || "Unnamed customer",
+        key = sale.customer_id ? `id:${sale.customer_id}` : `name:${name.toLowerCase()}`,
+        current = byCustomer.get(key) || {
+          customerId: sale.customer_id,
+          name,
+          total: 0,
+          count: 0,
+        };
+      current.total += Number(sale.total);
+      current.count += 1;
+      byCustomer.set(key, current);
+    }
+    return [...byCustomer.values()].sort((a, b) => b.total - a.total);
+  }, [sales]);
   async function paid() {
     if (!supabase) return;
     const chosen = sales.filter((s) => selected.includes(s.id)),
@@ -786,8 +999,30 @@ function Reports({ business, userId }: { business: Business; userId: string }) {
           Outstanding
         </button>
       </div>
+      {view === "outstanding" && balances.length > 0 && (
+        <section className="block">
+          <Heading
+            label="Per person"
+            title="To collect"
+            text="Unpaid balance grouped by customer."
+          />
+          <div className="card balance-card">
+            {balances.map((person) => (
+              <div className="row" key={person.customerId ?? person.name}>
+                <div>
+                  <b>{person.name}</b>
+                  <span>
+                    {person.count} unpaid {person.count === 1 ? "order" : "orders"}
+                  </span>
+                </div>
+                <strong>{php.format(person.total)}</strong>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
       {sales.length ? (
-        <div className="card">
+        <div className="card report-orders">
           {sales.map((s) => (
             <label className="row sale" key={s.id}>
               {view === "outstanding" && (
@@ -863,7 +1098,7 @@ export default function App() {
       const [v, d] = await Promise.all([
         supabase
           .from("product_variants")
-          .select("id,product_id,name,package_quantity,default_price,products(id,name)")
+          .select("id,product_id,name,package_quantity,default_price,is_active,products(id,name)")
           .eq("business_id", b.id)
           .eq("is_active", true),
         supabase
@@ -880,7 +1115,7 @@ export default function App() {
           supabase
             .from("daily_stock")
             .select(
-              "id,variant_id,brought_quantity,product_variants(id,product_id,name,package_quantity,default_price,products(id,name))",
+              "id,variant_id,brought_quantity,product_variants!inner(id,product_id,name,package_quantity,default_price,is_active,products(id,name))",
             )
             .eq("selling_day_id", d.data.id),
           supabase
@@ -890,7 +1125,8 @@ export default function App() {
           supabase
             .from("stock_adjustments")
             .select("variant_id,quantity_delta")
-            .eq("selling_day_id", d.data.id),
+            .eq("selling_day_id", d.data.id)
+            .eq("product_variants.is_active", true),
         ]);
         const soldByVariant = new Map<number, number>();
         for (const row of sold.data || [])
@@ -983,6 +1219,8 @@ export default function App() {
         {tab === "stock" && (
           <StockPage
             business={business}
+            day={day}
+            variants={variants}
             stock={stock}
             reload={() => void load()}
           />

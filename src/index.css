@@ -210,6 +210,51 @@ input:focus {
   gap: 12px;
   border-bottom: 1px solid #f5e7ed;
 }
+.block {
+  margin-top: 24px;
+}
+.inline-stock {
+  display: grid;
+  justify-items: end;
+  gap: 8px;
+}
+.inline-stock .secondary {
+  min-height: 42px;
+  padding: 0 14px;
+}
+.stock-actions {
+  display: grid;
+  justify-items: end;
+  gap: 7px;
+  text-align: right;
+}
+.compact {
+  min-height: 38px;
+  padding: 0 12px;
+  font-size: 12px;
+}
+.secondary.danger {
+  background: #fff0f4;
+  color: #b4234b;
+  box-shadow: none;
+}
+.secondary.danger:disabled {
+  opacity: 0.35;
+}
+.danger-link {
+  width: auto;
+  min-height: 0;
+  padding: 0;
+  color: #b4234b;
+  font-size: 12px;
+  text-align: right;
+}
+.report-orders {
+  margin-top: 14px;
+}
+.balance-card strong {
+  color: #a52e60;
+}
 .row:last-child {
   border: 0;
 }
