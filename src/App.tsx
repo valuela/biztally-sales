@@ -357,6 +357,7 @@ function StartDay({
       chosen.map((item) => ({
         selling_day_id: d.data.id,
         variant_id: item.id,
+        brought_quantity: q[item.id] || 0,
       })),
     );
     if (offeringResult.error) {
@@ -623,14 +624,14 @@ function Sell({
   userId,
   day,
   variants,
-  stock,
+  offeringStock,
   reload,
 }: {
   business: Business;
   userId: string;
   day: Day;
   variants: Variant[];
-  stock: Stock[];
+  offeringStock: Record<number, number>;
   reload: () => void;
 }) {
   const [cart, setCart] = useState<Record<number, Cart>>({}),
@@ -650,40 +651,10 @@ function Sell({
     () => groupVariantsByProduct(variants),
     [variants],
   );
-  const stockByVariant = useMemo(
-    () => new Map(stock.map((item) => [item.variant_id, item.brought_quantity])),
-    [stock],
-  );
-  function reservedDemand(current: Record<number, Cart>, excludeId?: number) {
-    const reserved = new Map<number, number>();
-    for (const item of Object.values(current)) {
-      if (item.variant.id === excludeId) continue;
-      for (const component of componentDemand(item.variant, item.quantity))
-        reserved.set(
-          component.component_variant_id,
-          (reserved.get(component.component_variant_id) || 0) +
-            component.quantity,
-        );
-    }
-    return reserved;
-  }
-  function availableFor(
-    variant: Variant,
-    reserved = reservedDemand(cart),
-  ) {
-    const recipe = componentDemand(variant, 1);
-    if (!recipe.length) return 0;
+  function availableFor(variant: Variant, current = cart) {
     return Math.max(
       0,
-      Math.min(
-        ...recipe.map((component) =>
-          Math.floor(
-            ((stockByVariant.get(component.component_variant_id) || 0) -
-              (reserved.get(component.component_variant_id) || 0)) /
-              component.quantity,
-          ),
-        ),
-      ),
+      (offeringStock[variant.id] || 0) - (current[variant.id]?.quantity || 0),
     );
   }
   useEffect(() => {
@@ -703,8 +674,7 @@ function Sell({
   function add(v: Variant) {
     setCart((current) => {
       const picked = current[v.id]?.quantity || 0;
-      const remaining = availableFor(v, reservedDemand(current, v.id));
-      if (picked >= remaining) return current;
+      if (availableFor(v, current) < 1) return current;
       return {
         ...current,
         [v.id]: current[v.id]
@@ -795,9 +765,7 @@ function Sell({
               </div>
             </header>
             <div className="sell-variants">
-              {[...group.variants]
-                .sort((a, b) => availableFor(b) - availableFor(a))
-                .map((v) => {
+              {group.variants.map((v) => {
                 const picked = cart[v.id]?.quantity || 0,
                   remaining = availableFor(v),
                   label = group.name + " " + v.name;
@@ -930,10 +898,7 @@ function Sell({
                             delete next[l.variant.id];
                             return next;
                           }
-                          const max = availableFor(
-                            l.variant,
-                            reservedDemand(c, l.variant.id),
-                          );
+                          const max = offeringStock[l.variant.id] || 0;
                           return {
                             ...c,
                             [l.variant.id]: {
@@ -1283,9 +1248,21 @@ function StockPage({
       .from("daily_stock")
       .upsert(rows, { onConflict: "selling_day_id,variant_id" });
     if (error) return setError(error.message);
+    const existingOffering = await supabase
+      .from("selling_day_variants")
+      .select("brought_quantity")
+      .eq("selling_day_id", day.id)
+      .eq("variant_id", variant.id)
+      .maybeSingle();
+    if (existingOffering.error) return setError(existingOffering.error.message);
     const offeringResult = await supabase.from("selling_day_variants").upsert(
-      { selling_day_id: day.id, variant_id: variant.id },
-      { onConflict: "selling_day_id,variant_id", ignoreDuplicates: true },
+      {
+        selling_day_id: day.id,
+        variant_id: variant.id,
+        brought_quantity:
+          Number(existingOffering.data?.brought_quantity || 0) + quantity,
+      },
+      { onConflict: "selling_day_id,variant_id" },
     );
     if (offeringResult.error) return setError(offeringResult.error.message);
     else {
@@ -2403,7 +2380,7 @@ export default function App() {
     [variants, setVariants] = useState<Variant[]>([]),
     [day, setDay] = useState<Day | null>(null),
     [stock, setStock] = useState<Stock[]>([]),
-    [dayVariantIds, setDayVariantIds] = useState<number[]>([]),
+    [dayVariantStock, setDayVariantStock] = useState<Record<number, number>>({}),
     [tab, setTab] = useState<"sell" | "stock" | "reports">("sell"),
     [settings, setSettings] = useState(false),
     [online, setOnline] = useState(() => navigator.onLine),
@@ -2475,20 +2452,26 @@ export default function App() {
           supabase
             .from("sale_items")
             .select(
-              "variant_id,quantity,sales!inner(selling_day_id),sale_item_components(component_variant_id,quantity)",
+              "variant_id,quantity,sales!inner(selling_day_id,voided_at),sale_item_components(component_variant_id,quantity)",
             )
-            .eq("sales.selling_day_id", d.data.id),
+            .eq("sales.selling_day_id", d.data.id)
+            .is("sales.voided_at", null),
           supabase
             .from("stock_adjustments")
             .select("variant_id,quantity_delta")
             .eq("selling_day_id", d.data.id),
           supabase
             .from("selling_day_variants")
-            .select("variant_id")
+            .select("variant_id,brought_quantity")
             .eq("selling_day_id", d.data.id),
         ]);
         const soldByVariant = new Map<number, number>();
+        const soldUnitsByVariant = new Map<number, number>();
         for (const row of sold.data || []) {
+          soldUnitsByVariant.set(
+            row.variant_id,
+            (soldUnitsByVariant.get(row.variant_id) || 0) + row.quantity,
+          );
           const components = (row.sale_item_components || []) as {
             component_variant_id: number;
             quantity: number;
@@ -2524,12 +2507,21 @@ export default function App() {
           ),
         }));
         setStock(available);
-        setDayVariantIds(
-          (offered.data || []).map((item) => Number(item.variant_id)),
+        setDayVariantStock(
+          Object.fromEntries(
+            (offered.data || []).map((item) => [
+              Number(item.variant_id),
+              Math.max(
+                0,
+                Number(item.brought_quantity) -
+                  (soldUnitsByVariant.get(Number(item.variant_id)) || 0),
+              ),
+            ]),
+          ),
         );
       } else {
         setStock([]);
-        setDayVariantIds([]);
+        setDayVariantStock({});
       }
     },
     [business],
@@ -2680,13 +2672,11 @@ export default function App() {
               userId={session.user.id}
               day={day}
               variants={
-                dayVariantIds.length
-                  ? variants.filter((variant) =>
-                      dayVariantIds.includes(variant.id),
-                    )
+                Object.keys(dayVariantStock).length
+                  ? variants.filter((variant) => variant.id in dayVariantStock)
                   : variants
               }
-              stock={stock}
+              offeringStock={dayVariantStock}
               reload={() => void load()}
             />
           ) : (
