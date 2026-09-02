@@ -1042,6 +1042,8 @@ function StockPage({
     [packPrice, setPackPrice] = useState(""),
     [packQty, setPackQty] = useState<Record<number, number>>({}),
     [addQty, setAddQty] = useState<Record<number, number>>({}),
+    [addingToday, setAddingToday] = useState(false),
+    [expandedAddToday, setExpandedAddToday] = useState<Record<number, boolean>>({}),
     [showProducts, setShowProducts] = useState(false),
     [catalog, setCatalog] = useState<Variant[]>([]),
     [editing, setEditing] = useState<Variant | null>(null),
@@ -1051,12 +1053,20 @@ function StockPage({
     [editPackQty, setEditPackQty] = useState<Record<number, number>>({}),
     [error, setError] = useState("");
 
-  const stockedVariantIds = new Set(stock.map((item) => item.variant_id));
+  const stockedVariantIds = new Set(
+    stock
+      .filter((item) => item.brought_quantity > 0)
+      .map((item) => item.variant_id),
+  );
   const missingToday = day
     ? variants.filter(
         (item) => item.is_bundle || !stockedVariantIds.has(item.id),
       )
     : [];
+  const missingTodayGroups = groupVariantsByProduct(missingToday);
+  const selectedTodayCount = missingToday.filter(
+    (item) => (addQty[item.id] || 0) > 0,
+  ).length;
   const remainingByVariant = new Map(
     stock.map((item) => [item.variant_id, item.brought_quantity]),
   );
@@ -1248,63 +1258,98 @@ function StockPage({
     setPackQty({});
     refresh();
   }
-  async function addToToday(variant: Variant) {
+  async function addSelectedToToday() {
     if (!supabase || !day) return;
     setError("");
-    const quantity = addQty[variant.id] || 0;
-    if (quantity < 1) return setError("Choose quantity to add today.");
-    const recipe = componentDemand(variant, quantity);
-    if (variant.is_bundle && !recipe.length)
-      return setError("This pack has no recipe yet.");
-    const label = (variant.products?.name || "Product") + " " + variant.name;
+    const selected = missingToday.filter(
+      (item) => (addQty[item.id] || 0) > 0,
+    );
+    if (!selected.length)
+      return setError("Choose at least one quantity to add.");
     if (
-      !window.confirm(
-        "Add " + stockLabel(quantity, variant) + " of " + label + " to today's stock?",
+      selected.some(
+        (item) => item.is_bundle && !componentDemand(item, 1).length,
       )
     )
-      return;
-    const rows = recipe.map((component) => {
-      const existing = stock.find(
-        (item) => item.variant_id === component.component_variant_id,
-      );
-      return {
-        business_id: business.id,
-        selling_day_id: day.id,
-        variant_id: component.component_variant_id,
-        brought_quantity:
-          (existing?.initial_quantity ?? existing?.brought_quantity ?? 0) +
-          component.quantity,
-      };
-    });
+      return setError("One selected pack has no recipe yet.");
+    const summary = selected
+      .map(
+        (item) =>
+          (item.products?.name || "Product") +
+          " " +
+          item.name +
+          ": " +
+          addQty[item.id],
+      )
+      .join("\n");
+    if (!window.confirm("Add these items to today?\n\n" + summary)) return;
+
+    setAddingToday(true);
+    const componentTotals = new Map<number, number>();
+    for (const item of selected)
+      for (const component of componentDemand(item, addQty[item.id] || 0))
+        componentTotals.set(
+          component.component_variant_id,
+          (componentTotals.get(component.component_variant_id) || 0) +
+            component.quantity,
+        );
+
+    const rows = [...componentTotals].map(
+      ([componentVariantId, quantity]) => {
+        const existing = stock.find(
+          (item) => item.variant_id === componentVariantId,
+        );
+        return {
+          business_id: business.id,
+          selling_day_id: day.id,
+          variant_id: componentVariantId,
+          brought_quantity:
+            (existing?.initial_quantity ??
+              existing?.brought_quantity ??
+              0) + quantity,
+        };
+      },
+    );
     const { error } = await supabase
       .from("daily_stock")
       .upsert(rows, { onConflict: "selling_day_id,variant_id" });
-    if (error) return setError(error.message);
-    const existingOffering = await supabase
+    if (error) {
+      setAddingToday(false);
+      return setError(error.message);
+    }
+
+    const existingOfferings = await supabase
       .from("selling_day_variants")
-      .select("brought_quantity")
+      .select("variant_id,brought_quantity")
       .eq("selling_day_id", day.id)
-      .eq("variant_id", variant.id)
-      .maybeSingle();
-    if (existingOffering.error) return setError(existingOffering.error.message);
+      .in(
+        "variant_id",
+        selected.map((item) => item.id),
+      );
+    if (existingOfferings.error) {
+      setAddingToday(false);
+      return setError(existingOfferings.error.message);
+    }
+    const currentOfferings = new Map(
+      (existingOfferings.data || []).map((item) => [
+        item.variant_id,
+        item.brought_quantity,
+      ]),
+    );
     const offeringResult = await supabase.from("selling_day_variants").upsert(
-      {
+      selected.map((item) => ({
         selling_day_id: day.id,
-        variant_id: variant.id,
+        variant_id: item.id,
         brought_quantity:
-          Number(existingOffering.data?.brought_quantity || 0) + quantity,
-      },
+          Number(currentOfferings.get(item.id) || 0) +
+          (addQty[item.id] || 0),
+      })),
       { onConflict: "selling_day_id,variant_id" },
     );
+    setAddingToday(false);
     if (offeringResult.error) return setError(offeringResult.error.message);
-    else {
-      setAddQty((current) => {
-        const next = { ...current };
-        delete next[variant.id];
-        return next;
-      });
-      refresh();
-    }
+    setAddQty({});
+    refresh();
   }
   async function removeFromToday(item: Stock) {
     if (!supabase || !day) return;
@@ -1568,41 +1613,105 @@ function StockPage({
         />
       )}
       {day && missingToday.length > 0 && (
-        <section className="block">
+        <section className="block add-today">
           <Heading
             label="Forgot something?"
             title="Add to today"
-            text="Pick the quantity she brought."
+            text="Set quantities, then add everything once."
           />
-          <div className="card">
-            {missingToday.map((v) => (
-              <div className="row" key={v.id}>
-                <div>
-                  <b>{v.products?.name}</b>
-                  <span>
-                    {v.name} · {unitLabel(v)} · {php.format(v.default_price)}
-                  </span>
-                  {v.is_bundle && (
-                    <span className="recipe">{bundleContents(v)}</span>
-                  )}
-                </div>
-                <div className="inline-stock">
-                  <Stepper
-                    value={addQty[v.id] || 0}
-                    set={(n) => setAddQty((x) => ({ ...x, [v.id]: n }))}
-                  />
-                  <button className="secondary" onClick={() => addToToday(v)}>
-                    Add
+          <div className="sell-groups start-groups">
+            {missingTodayGroups.map((group, groupIndex) => {
+              const isExpanded =
+                  expandedAddToday[group.id] ?? groupIndex === 0,
+                entered = group.variants.filter(
+                  (variant) => (addQty[variant.id] || 0) > 0,
+                ).length,
+                contentId = "add-today-product-" + group.id;
+              return (
+                <section className="sell-product" key={group.id}>
+                  <button
+                    type="button"
+                    className="sell-product-head product-collapse"
+                    aria-expanded={isExpanded}
+                    aria-controls={contentId}
+                    onClick={() =>
+                      setExpandedAddToday((current) => ({
+                        ...current,
+                        [group.id]: !isExpanded,
+                      }))
+                    }
+                  >
+                    <i aria-hidden="true">
+                      {group.name.slice(0, 1) || "P"}
+                    </i>
+                    <div>
+                      <h2>{group.name}</h2>
+                      <span>
+                        {group.variants.length} options {" / "}
+                        {entered || "None"} entered
+                      </span>
+                    </div>
+                    <ChevronDown
+                      className="collapse-chevron"
+                      aria-hidden="true"
+                    />
                   </button>
-                </div>
-              </div>
-            ))}
+                  {isExpanded && (
+                    <div className="sell-variants" id={contentId}>
+                      {group.variants.map((v) => (
+                        <article className="start-variant" key={v.id}>
+                          <div className="sell-variant-copy">
+                            <div className="sell-variant-title">
+                              <b>{v.name}</b>
+                              <span className="sell-kind">
+                                {v.is_bundle ? "Pack" : "Piece"}
+                              </span>
+                            </div>
+                            {v.is_bundle && (
+                              <span className="recipe">
+                                {bundleContents(v)}
+                              </span>
+                            )}
+                            <small>
+                              <strong>{php.format(v.default_price)}</strong>
+                              <span> / {unitLabel(v)}</span>
+                            </small>
+                          </div>
+                          <div className="quantity-input">
+                            <span>Quantity</span>
+                            <Stepper
+                              value={addQty[v.id] || 0}
+                              set={(n) =>
+                                setAddQty((current) => ({
+                                  ...current,
+                                  [v.id]: n,
+                                }))
+                              }
+                            />
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              );
+            })}
+            <button
+              className="primary add-today-submit"
+              disabled={!selectedTodayCount || addingToday}
+              onClick={() => void addSelectedToToday()}
+            >
+              {addingToday
+                ? "Adding…"
+                : selectedTodayCount
+                  ? "Add " + selectedTodayCount + " selected to today"
+                  : "Choose quantities to add"}
+            </button>
           </div>
         </section>
       )}
         </>
-      )}
-      {showProducts && (
+      )}      {showProducts && (
       <section className="block product-manager">
         {catalog.length ? (
           <div className="sell-groups product-list-groups">
