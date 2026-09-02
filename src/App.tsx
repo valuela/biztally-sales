@@ -625,6 +625,7 @@ function Sell({
   day,
   variants,
   offeringStock,
+  stock,
   reload,
 }: {
   business: Business;
@@ -632,6 +633,7 @@ function Sell({
   day: Day;
   variants: Variant[];
   offeringStock: Record<number, number>;
+  stock: Stock[];
   reload: () => void;
 }) {
   const [cart, setCart] = useState<Record<number, Cart>>({}),
@@ -651,13 +653,41 @@ function Sell({
     () => groupVariantsByProduct(variants),
     [variants],
   );
+  const stockByVariant = useMemo(
+    () => new Map(stock.map((item) => [item.variant_id, item.brought_quantity])),
+    [stock],
+  );
+  function reservedDemand(current: Record<number, Cart>) {
+    const reserved = new Map<number, number>();
+    for (const item of Object.values(current))
+      for (const component of componentDemand(item.variant, item.quantity))
+        reserved.set(
+          component.component_variant_id,
+          (reserved.get(component.component_variant_id) || 0) +
+            component.quantity,
+        );
+    return reserved;
+  }
   function availableFor(variant: Variant, current = cart) {
+    const picked = current[variant.id]?.quantity || 0;
+    const recipe = componentDemand(variant, 1);
+    const reserved = reservedDemand(current);
+    const componentAvailable = recipe.length
+      ? Math.min(
+          ...recipe.map((component) =>
+            Math.floor(
+              ((stockByVariant.get(component.component_variant_id) || 0) -
+                (reserved.get(component.component_variant_id) || 0)) /
+                component.quantity,
+            ),
+          ),
+        )
+      : 0;
     return Math.max(
       0,
-      (offeringStock[variant.id] || 0) - (current[variant.id]?.quantity || 0),
+      Math.min((offeringStock[variant.id] || 0) - picked, componentAvailable),
     );
-  }
-  useEffect(() => {
+  }  useEffect(() => {
     const t = setTimeout(async () => {
       if (!supabase || name.trim().length < 2 || customer)
         return setSuggestions([]);
@@ -898,7 +928,9 @@ function Sell({
                             delete next[l.variant.id];
                             return next;
                           }
-                          const max = offeringStock[l.variant.id] || 0;
+                          const max =
+                            (c[l.variant.id]?.quantity || 0) +
+                            availableFor(l.variant, c);
                           return {
                             ...c,
                             [l.variant.id]: {
@@ -2051,18 +2083,41 @@ function Reports({ business, userId }: { business: Business; userId: string }) {
   }, [sales]);
   function exportCsv() {
     const rows = [["Date", "Customer", "Payment", "Product", "Variant", "Quantity", "Unit Price", "Total"]];
-    for (const sale of sales)
-      for (const item of sale.sale_items || [])
-        rows.push([
-          new Date(sale.sold_at).toLocaleDateString("en-PH"),
-          sale.customer_name,
-          sale.payment_status,
-          item.product_name,
-          item.variant_name,
-          String(item.quantity),
-          String(item.unit_price),
-          String(item.line_total),
-        ]);
+    const groupedSales = new Map<string, Sale[]>();
+    for (const sale of sales) {
+      const key = sale.customer_id
+        ? "id:" + sale.customer_id
+        : "name:" + (sale.customer_name || "Unnamed customer").trim().toLocaleLowerCase();
+      groupedSales.set(key, [...(groupedSales.get(key) || []), sale]);
+    }
+    const customerGroups = [...groupedSales.values()].sort((a, b) =>
+      (a[0]?.customer_name || "Unnamed customer").localeCompare(
+        b[0]?.customer_name || "Unnamed customer",
+      ),
+    );
+    for (const customerSales of customerGroups) {
+      let showCustomer = true;
+      let customerTotal = 0;
+      for (const sale of [...customerSales].sort(
+        (a, b) => new Date(a.sold_at).getTime() - new Date(b.sold_at).getTime(),
+      )) {
+        for (const item of sale.sale_items || []) {
+          rows.push([
+            new Date(sale.sold_at).toLocaleDateString("en-PH"),
+            showCustomer ? sale.customer_name || "Unnamed customer" : "",
+            sale.payment_status,
+            item.product_name,
+            item.variant_name,
+            String(item.quantity),
+            String(item.unit_price),
+            String(item.line_total),
+          ]);
+          customerTotal += Number(item.line_total);
+          showCustomer = false;
+        }
+      }
+      rows.push(["", "", "", "Customer total", "", "", "", String(customerTotal)]);
+    }
     const csv = rows.map((row) => row.map((value) => '"' + String(value).replace(/"/g, '""') + '"').join(",")).join("\n");
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
     const link = document.createElement("a");
@@ -2070,6 +2125,153 @@ function Reports({ business, userId }: { business: Business; userId: string }) {
     link.download = "biztally-report-" + selectedDate + ".csv";
     link.click();
     URL.revokeObjectURL(url);
+  }
+  async function downloadPdf() {
+    const { jsPDF } = await import("jspdf");
+    const pdf = new jsPDF({ unit: "mm", format: "a4" });
+    const pageWidth = pdf.internal.pageSize.getWidth();
+    const pageHeight = pdf.internal.pageSize.getHeight();
+    const margin = 12;
+    const contentWidth = pageWidth - margin * 2;
+    let y = 14;
+    const money = (value: number) =>
+      "PHP " + Number(value).toLocaleString("en-PH", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      });
+    const addPageIfNeeded = (height: number) => {
+      if (y + height <= pageHeight - 12) return;
+      pdf.addPage();
+      y = 14;
+    };
+
+    pdf.setFillColor(255, 240, 247);
+    pdf.roundedRect(margin, y, contentWidth, 22, 3, 3, "F");
+    pdf.setTextColor(173, 45, 101);
+    pdf.setFont("helvetica", "bold");
+    pdf.setFontSize(15);
+    pdf.text("BizTally Sales Report", margin + 5, y + 8);
+    pdf.setTextColor(80, 60, 70);
+    pdf.setFont("helvetica", "normal");
+    pdf.setFontSize(9);
+    pdf.text(fullDate, margin + 5, y + 15);
+    pdf.text(
+      money(sales.reduce((sum, sale) => sum + Number(sale.total), 0)),
+      pageWidth - margin - 5,
+      y + 12,
+      { align: "right" },
+    );
+    y += 27;
+
+    const groupedSales = new Map<string, Sale[]>();
+    for (const sale of sales) {
+      const key = sale.customer_id
+        ? "id:" + sale.customer_id
+        : "name:" + (sale.customer_name || "Unnamed customer").trim().toLocaleLowerCase();
+      groupedSales.set(key, [...(groupedSales.get(key) || []), sale]);
+    }
+    const groups = [...groupedSales.values()].sort((a, b) =>
+      (a[0]?.customer_name || "Unnamed customer").localeCompare(
+        b[0]?.customer_name || "Unnamed customer",
+      ),
+    );
+
+    for (const customerSales of groups) {
+      const sortedSales = [...customerSales].sort(
+        (a, b) => new Date(a.sold_at).getTime() - new Date(b.sold_at).getTime(),
+      );
+      const customerTotal = sortedSales.reduce(
+        (sum, sale) => sum + Number(sale.total),
+        0,
+      );
+      addPageIfNeeded(18);
+      pdf.setFillColor(250, 245, 248);
+      pdf.roundedRect(margin, y, contentWidth, 10, 2, 2, "F");
+      pdf.setTextColor(35, 25, 30);
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(11);
+      pdf.text(
+        customerSales[0]?.customer_name || "Unnamed customer",
+        margin + 4,
+        y + 6.5,
+      );
+      pdf.setTextColor(173, 45, 101);
+      pdf.text(money(customerTotal), pageWidth - margin - 4, y + 6.5, {
+        align: "right",
+      });
+      y += 13;
+
+      for (const sale of sortedSales) {
+        const items = sale.sale_items || [];
+        addPageIfNeeded(9 + items.length * 6);
+        const time = new Intl.DateTimeFormat("en-PH", {
+          hour: "numeric",
+          minute: "2-digit",
+          hour12: true,
+          timeZone: "Asia/Manila",
+        }).format(new Date(sale.sold_at));
+        pdf.setTextColor(95, 75, 85);
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(8.5);
+        const timeLabel = time + "  |";
+        const statusLabel = sale.payment_status === "paid" ? "Paid" : "To pay";
+        const statusX = margin + 5 + pdf.getTextWidth(timeLabel);
+        pdf.text(timeLabel, margin + 3, y);
+        if (sale.payment_status === "paid") {
+          pdf.setFillColor(226, 247, 235);
+          pdf.setTextColor(30, 122, 74);
+        } else {
+          pdf.setFillColor(255, 232, 240);
+          pdf.setTextColor(183, 48, 99);
+        }
+        pdf.roundedRect(
+          statusX - 1.2,
+          y - 3.5,
+          pdf.getTextWidth(statusLabel) + 3.2,
+          4.8,
+          1.4,
+          1.4,
+          "F",
+        );
+        pdf.text(statusLabel, statusX + 0.4, y);
+        pdf.setTextColor(95, 75, 85);
+        pdf.text(money(sale.total), pageWidth - margin - 3, y, {
+          align: "right",
+        });
+        y += 5;
+        pdf.setFont("helvetica", "normal");
+        pdf.setFontSize(8.5);
+        for (const item of items) {
+          const description =
+            item.product_name + " - " + item.variant_name + "  x" + item.quantity;
+          pdf.setTextColor(45, 40, 42);
+          pdf.text(description, margin + 6, y, {
+            maxWidth: contentWidth - 45,
+          });
+          pdf.text(money(item.line_total), pageWidth - margin - 3, y, {
+            align: "right",
+          });
+          y += 5.5;
+        }
+        y += 2;
+      }
+      y += 2;
+    }
+
+    const pageCount = pdf.getNumberOfPages();
+    for (let page = 1; page <= pageCount; page += 1) {
+      pdf.setPage(page);
+      pdf.setFont("helvetica", "normal");
+      pdf.setFontSize(7.5);
+      pdf.setTextColor(135, 120, 128);
+      pdf.text(
+        "BizTally  |  Page " + page + " of " + pageCount,
+        pageWidth / 2,
+        pageHeight - 6,
+        { align: "center" },
+      );
+    }
+    pdf.save("biztally-report-" + selectedDate + ".pdf");
   }
   async function voidSale(sale: Sale) {
     if (!supabase) return;
@@ -2210,7 +2412,7 @@ function Reports({ business, userId }: { business: Business; userId: string }) {
       )}
       <div className="report-actions">
         <button type="button" className="secondary compact" disabled={!sales.length} onClick={exportCsv}>Export CSV</button>
-        <button type="button" className="secondary compact" onClick={() => window.print()}>Print</button>
+        <button type="button" className="secondary compact" disabled={!sales.length} onClick={downloadPdf}>Download PDF</button>
       </div>
       {reportError && (
         <p className="error" role="alert" aria-live="polite">
@@ -2673,10 +2875,25 @@ export default function App() {
               day={day}
               variants={
                 Object.keys(dayVariantStock).length
-                  ? variants.filter((variant) => variant.id in dayVariantStock)
+                  ? variants.filter((variant) => {
+                      if ((dayVariantStock[variant.id] || 0) < 1) return false;
+                      const recipe = componentDemand(variant, 1);
+                      return (
+                        recipe.length > 0 &&
+                        recipe.every((component) =>
+                          stock.some(
+                            (item) =>
+                              item.variant_id ===
+                                component.component_variant_id &&
+                              item.brought_quantity >= component.quantity,
+                          ),
+                        )
+                      );
+                    })
                   : variants
               }
               offeringStock={dayVariantStock}
+              stock={stock}
               reload={() => void load()}
             />
           ) : (
