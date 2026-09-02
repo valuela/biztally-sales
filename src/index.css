@@ -1506,6 +1506,10 @@ select:focus {
 }
 
 .review-price {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
   width: fit-content;
   min-height: 30px;
   margin: 2px 0 0 -7px;
@@ -1519,10 +1523,9 @@ select:focus {
 }
 
 .review-price svg {
+  flex: 0 0 auto;
   width: 12px;
   height: 12px;
-  margin-left: 3px;
-  vertical-align: -2px;
 }
 
 .review-price-field {
@@ -2423,4 +2426,123 @@ select:focus {
     align-items: end;
     flex-direction: column;
   }
+}
+.review-payment-method {
+  display: grid;
+  gap: 7px;
+}
+
+.review-payment-method > b {
+  font-size: 13px;
+}
+
+.review-payment-method small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.review-sale .payment-methods {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.review-sale .payment-methods button {
+  padding-inline: 8px;
+  font-size: 13px;
+}
+
+.payment-method-label {
+  color: var(--muted);
+  font-size: 11px !important;
+}
+.report-payment-panel {
+  bottom: calc(86px + env(safe-area-inset-bottom));
+  z-index: 21;
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid #efd8e2;
+  border-radius: 18px;
+  background: rgba(255, 250, 252, .97);
+  box-shadow: 0 10px 30px rgba(83, 31, 51, .16);
+  backdrop-filter: blur(12px);
+}
+
+.report-payment-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.report-payment-summary span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.report-payment-panel .segments {
+  margin: 0;
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.report-payment-panel .segments button {
+  padding-inline: 6px;
+  font-size: 12px;
+}
+
+.report-payment-panel .report-pay {
+  width: 100%;
+}
+.review-sale .payment-status-options {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.review-sale .payment-status-options button {
+  padding-inline: 6px;
+  font-size: 13px;
+}
+
+.partial-payment-field {
+  display: grid;
+  gap: 6px;
+}
+
+.partial-payment-field > span {
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.partial-payment-field > div {
+  display: flex;
+  align-items: center;
+  min-height: 48px;
+  padding: 0 14px;
+  border: 1px solid #e8ced9;
+  border-radius: 12px;
+  background: #fff;
+  color: #a52e60;
+  font-weight: 800;
+}
+
+.partial-payment-field input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  font-weight: 800;
+}
+
+.partial-payment-field small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.payment-pill.partial {
+  background: #fff2cf;
+  color: #8a6110;
+}
+.partial-payment-summary {
+  color: #8a6110;
+  font-size: 11px !important;
+  font-weight: 700;
 }

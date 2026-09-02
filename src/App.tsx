@@ -64,12 +64,15 @@ type Cart = {
   unitPrice: number;
 };
 type Customer = { id: number; name: string };
+type PaymentMethod = "" | "cash" | "gcash" | "bank_transfer";
 type Sale = {
   id: string;
   customer_id: number | null;
   customer_name: string;
   total: number;
   payment_status: string;
+  payment_method: string | null;
+  amount_paid: number;
   sold_at: string;
   voided_at?: string | null;
   void_reason?: string | null;
@@ -95,6 +98,20 @@ const php = new Intl.NumberFormat("en-PH", {
   style: "currency",
   currency: "PHP",
 });
+const paymentMethodLabel = (method?: string | null) => {
+  if (method === "cash") return "Cash";
+  if (method === "gcash") return "GCash";
+  if (method === "bank_transfer") return "Bank transfer";
+  return "";
+};
+const balanceDue = (sale: Pick<Sale, "total" | "amount_paid">) =>
+  Math.max(0, Number(sale.total) - Number(sale.amount_paid));
+const salePaymentLabel = (sale: Pick<Sale, "payment_status" | "amount_paid">) =>
+  sale.payment_status === "paid"
+    ? "Paid"
+    : Number(sale.amount_paid) > 0
+      ? "Partial"
+      : "Pay Later";
 const today = () =>
   new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Manila" }).format(
     new Date(),
@@ -642,7 +659,9 @@ function Sell({
     [customer, setCustomer] = useState<Customer | null>(null),
     [suggestions, setSuggestions] = useState<Customer[]>([]),
     [walkIn, setWalkIn] = useState(false),
-    [payment, setPayment] = useState<"paid" | "unpaid">("paid"),
+    [payment, setPayment] = useState<"paid" | "unpaid" | "partial">("paid"),
+    [paymentMethod, setPaymentMethod] = useState<PaymentMethod>(""),
+    [partialAmount, setPartialAmount] = useState(""),
     [editingPriceId, setEditingPriceId] = useState<number | null>(null),
     [saving, setSaving] = useState(false),
     [success, setSuccess] = useState(""),
@@ -736,6 +755,12 @@ function Sell({
     if (!supabase || saving) return;
     if (!lines.length) return setError("Add at least one item.");
     if (!walkIn && !name.trim()) return setError("Enter a customer name.");
+    const enteredPartial = Number(partialAmount);
+    if (payment === "partial" &&
+      (!Number.isFinite(enteredPartial) || enteredPartial <= 0 || enteredPartial >= total))
+      return setError("Enter an amount greater than ₱0 and less than the total.");
+    if ((walkIn || payment === "paid" || payment === "partial") && !paymentMethod)
+      return setError("Choose a payment method.");
     setSaving(true);
     setError("");
     try {
@@ -746,7 +771,17 @@ function Sell({
         customer_id: customer?.id || null,
         customer_name: walkIn ? null : name.trim(),
         is_walk_in: walkIn,
-        payment_status: walkIn ? "paid" : payment,
+        payment_status: walkIn || payment === "paid" ? "paid" : "unpaid",
+        payment_method:
+          walkIn || payment === "paid" || payment === "partial"
+            ? paymentMethod
+            : null,
+        amount_paid:
+          walkIn || payment === "paid"
+            ? total
+            : payment === "partial"
+              ? enteredPartial
+              : 0,
         items: lines.map((l) => ({
           variant_id: l.variant.id,
           quantity: l.quantity,
@@ -763,6 +798,8 @@ function Sell({
         setSuggestions([]);
         setWalkIn(false);
         setPayment("paid");
+        setPaymentMethod("");
+        setPartialAmount("");
         setEditingPriceId(null);
         setSuccess("Sale completed · " + php.format(total));
         window.setTimeout(() => setSuccess(""), 2800);
@@ -991,24 +1028,80 @@ function Sell({
               </div>}
             </div>
             {!walkIn && (
-              <div className="segments" role="group" aria-label="Payment status">
-                <button
-                  type="button"
-                  className={payment === "paid" ? "active" : ""}
-                  onClick={() => setPayment("paid")}
-                >
-                  Paid
-                </button>
-                <button
-                  type="button"
-                  className={payment === "unpaid" ? "active" : ""}
-                  onClick={() => setPayment("unpaid")}
-                >
-                  Pay Later
-                </button>
+              <div className="segments payment-status-options" role="group" aria-label="Payment status">
+                {([
+                  ["paid", "Paid"],
+                  ["partial", "Partial"],
+                  ["unpaid", "Pay Later"],
+                ] as const).map(([value, label]) => (
+                  <button
+                    type="button"
+                    key={value}
+                    className={payment === value ? "active" : ""}
+                    aria-pressed={payment === value}
+                    onClick={() => {
+                      setPayment(value);
+                      setPartialAmount("");
+                      if (value === "unpaid") setPaymentMethod("");
+                      setError("");
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
               </div>
             )}
-            {error && <p className="error" role="alert" aria-live="polite">{error}</p>}
+            {!walkIn && payment === "partial" && (
+              <label className="partial-payment-field">
+                <span>Amount received</span>
+                <div>
+                  <span aria-hidden="true">₱</span>
+                  <input
+                    type="number"
+                    name="partialAmount"
+                    inputMode="decimal"
+                    min="0.01"
+                    max={Math.max(0, total - 0.01)}
+                    step="0.01"
+                    value={partialAmount}
+                    placeholder="0.00"
+                    onChange={(event) => {
+                      setPartialAmount(event.target.value);
+                      setError("");
+                    }}
+                  />
+                </div>
+                <small>
+                  Remaining: {php.format(Math.max(0, total - (Number(partialAmount) || 0)))}
+                </small>
+              </label>
+            )}
+            {(walkIn || payment === "paid" || payment === "partial") && (
+              <div className="review-payment-method">
+                <b>Payment method</b>
+                <div className="segments payment-methods" role="group" aria-label="Payment method">
+                  {([
+                    ["cash", "Cash"],
+                    ["gcash", "GCash"],
+                    ["bank_transfer", "Bank transfer"],
+                  ] as const).map(([value, label]) => (
+                    <button
+                      type="button"
+                      key={value}
+                      className={paymentMethod === value ? "active" : ""}
+                      aria-pressed={paymentMethod === value}
+                      onClick={() => {
+                        setPaymentMethod(value);
+                        setError("");
+                      }}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {!paymentMethod && <small>Choose one to complete the sale.</small>}
+              </div>
+            )}            {error && <p className="error" role="alert" aria-live="polite">{error}</p>}
             <button type="button" className="primary review-complete" disabled={saving || !lines.length} onClick={save}>
               {saving ? "Completing…" : `Complete Sale · ${php.format(total)}`}
             </button>
@@ -2100,6 +2193,8 @@ function Reports({ business, userId }: { business: Business; userId: string }) {
     [expandedCustomer, setExpandedCustomer] = useState<string | null>(null),
     [loadingReports, setLoadingReports] = useState(true),
     [paying, setPaying] = useState(false),
+    [balancePaymentMethod, setBalancePaymentMethod] =
+      useState<PaymentMethod>(""),
     [reportError, setReportError] = useState("");
   const fullDate = useMemo(
     () =>
@@ -2137,7 +2232,7 @@ function Reports({ business, userId }: { business: Business; userId: string }) {
     let query = supabase
       .from("sales")
       .select(
-        "id,customer_id,customer_name,total,payment_status,sold_at,voided_at,void_reason,sale_items(id,product_name,variant_name,quantity,unit_price,line_total)",
+        "id,customer_id,customer_name,total,payment_status,payment_method,amount_paid,sold_at,voided_at,void_reason,sale_items(id,product_name,variant_name,quantity,unit_price,line_total)",
       )
             .eq("business_id", business.id)
       .is("voided_at", null)
@@ -2160,21 +2255,29 @@ function Reports({ business, userId }: { business: Business; userId: string }) {
     void load();
   }, [load]);
   const total = useMemo(
-    () => sales.reduce((sum, sale) => sum + Number(sale.total), 0),
-    [sales],
+    () =>
+      sales.reduce(
+        (sum, sale) =>
+          sum + (view === "outstanding" ? balanceDue(sale) : Number(sale.total)),
+        0,
+      ),
+    [sales, view],
   );
   const selectedTotal = useMemo(
     () =>
       sales
         .filter((sale) => selected.includes(sale.id))
-        .reduce((sum, sale) => sum + Number(sale.total), 0),
+        .reduce((sum, sale) => sum + balanceDue(sale), 0),
     [sales, selected],
   );
-  const paidTotal = sales
-    .filter((sale) => sale.payment_status === "paid")
-    .reduce((sum, sale) => sum + Number(sale.total), 0);
-  const unpaidTotal = total - paidTotal;
-  const bestSellers = useMemo(() => {
+  const paidTotal = sales.reduce(
+    (sum, sale) => sum + Number(sale.amount_paid),
+    0,
+  );
+  const unpaidTotal = sales.reduce(
+    (sum, sale) => sum + balanceDue(sale),
+    0,
+  );  const bestSellers = useMemo(() => {
     const items = new Map<string, { name: string; quantity: number; total: number }>();
     for (const sale of sales)
       for (const item of sale.sale_items || []) {
@@ -2191,7 +2294,7 @@ function Reports({ business, userId }: { business: Business; userId: string }) {
     return [...items.values()].sort((a, b) => b.quantity - a.quantity).slice(0, 3);
   }, [sales]);
   function exportCsv() {
-    const rows = [["Date", "Customer", "Payment", "Product", "Variant", "Quantity", "Unit Price", "Total"]];
+    const rows = [["Date", "Customer", "Payment status", "Payment method", "Amount paid", "Balance", "Product", "Variant", "Quantity", "Unit Price", "Total"]];
     const groupedSales = new Map<string, Sale[]>();
     for (const sale of sales) {
       const key = sale.customer_id
@@ -2214,7 +2317,10 @@ function Reports({ business, userId }: { business: Business; userId: string }) {
           rows.push([
             new Date(sale.sold_at).toLocaleDateString("en-PH"),
             showCustomer ? sale.customer_name || "Unnamed customer" : "",
-            sale.payment_status,
+            salePaymentLabel(sale),
+            paymentMethodLabel(sale.payment_method),
+            String(sale.amount_paid),
+            String(balanceDue(sale)),
             item.product_name,
             item.variant_name,
             String(item.quantity),
@@ -2225,7 +2331,7 @@ function Reports({ business, userId }: { business: Business; userId: string }) {
           showCustomer = false;
         }
       }
-      rows.push(["", "", "", "Customer total", "", "", "", String(customerTotal)]);
+      rows.push(["", "", "", "", "", "", "Customer total", "", "", "", String(customerTotal)]);
     }
     const csv = rows.map((row) => row.map((value) => '"' + String(value).replace(/"/g, '""') + '"').join(",")).join("\n");
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
@@ -2322,8 +2428,9 @@ function Reports({ business, userId }: { business: Business; userId: string }) {
         pdf.setTextColor(95, 75, 85);
         pdf.setFont("helvetica", "bold");
         pdf.setFontSize(8.5);
-        const timeLabel = time + "  |";
-        const statusLabel = sale.payment_status === "paid" ? "Paid" : "To pay";
+        const methodLabel = paymentMethodLabel(sale.payment_method);
+        const timeLabel = time + (methodLabel ? "  ·  " + methodLabel : "") + "  |";
+        const statusLabel = salePaymentLabel(sale);
         const statusX = margin + 5 + pdf.getTextWidth(timeLabel);
         pdf.text(timeLabel, margin + 3, y);
         if (sale.payment_status === "paid") {
@@ -2406,7 +2513,7 @@ function Reports({ business, userId }: { business: Business; userId: string }) {
         count: 0,
         sales: [],
       };
-      current.total += Number(sale.total);
+      current.total += balanceDue(sale);
       current.count += 1;
       current.sales.push(sale);
       byCustomer.set(key, current);
@@ -2422,6 +2529,8 @@ function Reports({ business, userId }: { business: Business; userId: string }) {
   }
   async function paid() {
     if (!supabase || paying || !selected.length) return;
+    if (!balancePaymentMethod)
+      return setReportError("Choose a payment method.");
     const chosen = sales.filter((sale) => selected.includes(sale.id));
     const customerId = chosen[0]?.customer_id;
     if (!customerId || chosen.some((sale) => sale.customer_id !== customerId))
@@ -2432,7 +2541,9 @@ function Reports({ business, userId }: { business: Business; userId: string }) {
           php.format(selectedTotal) +
           " from " +
           chosen[0].customer_name +
-          " as paid?",
+          " as paid via " +
+          paymentMethodLabel(balancePaymentMethod) +
+          "?",
       )
     )
       return;
@@ -2443,11 +2554,13 @@ function Reports({ business, userId }: { business: Business; userId: string }) {
       business_id: business.id,
       customer_id: customerId,
       sale_ids: selected,
+      payment_method: balancePaymentMethod,
       created_by: userId,
     });
     if (result.error) setReportError(result.error.message);
     else {
       setSelected([]);
+      setBalancePaymentMethod("");
       await load();
     }
     setPaying(false);
@@ -2551,9 +2664,26 @@ function Reports({ business, userId }: { business: Business; userId: string }) {
                   </div>
                   <div>
                     <strong>{php.format(sale.total)}</strong>
-                    <span className={"payment-pill " + sale.payment_status}>
-                      {sale.payment_status === "paid" ? "Paid" : "Pay Later"}
+                    <span className={
+                      "payment-pill " +
+                      (sale.payment_status === "paid"
+                        ? "paid"
+                        : Number(sale.amount_paid) > 0
+                          ? "partial"
+                          : "unpaid")
+                    }>
+                      {salePaymentLabel(sale)}
                     </span>
+                    {sale.payment_method && (
+                      <span className="payment-method-label">
+                        {paymentMethodLabel(sale.payment_method)}
+                      </span>
+                    )}
+                    {sale.payment_status === "unpaid" && Number(sale.amount_paid) > 0 && (
+                      <span className="partial-payment-summary">
+                        Paid {php.format(sale.amount_paid)} · Balance {php.format(balanceDue(sale))}
+                      </span>
+                    )}
                   </div>
                 </div>
                 <div className="report-items">
@@ -2653,7 +2783,7 @@ function Reports({ business, userId }: { business: Business; userId: string }) {
                             </span>
                           ))}
                         </span>
-                        <strong>{php.format(sale.total)}</strong>
+                        <strong>{php.format(balanceDue(sale))}</strong>
                       </label>
                     ))}
                   </div>
@@ -2670,16 +2800,40 @@ function Reports({ business, userId }: { business: Business; userId: string }) {
       )}
 
       {selected.length > 0 && (
-        <button
-          type="button"
-          className="primary sticky report-pay"
-          disabled={paying}
-          onClick={() => void paid()}
-        >
-          {paying
-            ? "Recording Payment…"
-            : `Mark ${selected.length} as Paid · ${php.format(selectedTotal)}`}
-        </button>
+        <div className="sticky report-payment-panel">
+          <div className="report-payment-summary">
+            <b>How did they pay?</b>
+            <span>{selected.length} selected · {php.format(selectedTotal)}</span>
+          </div>
+          <div className="segments payment-methods" role="group" aria-label="Balance payment method">
+            {([
+              ["cash", "Cash"],
+              ["gcash", "GCash"],
+              ["bank_transfer", "Bank transfer"],
+            ] as const).map(([value, label]) => (
+              <button
+                type="button"
+                key={value}
+                className={balancePaymentMethod === value ? "active" : ""}
+                aria-pressed={balancePaymentMethod === value}
+                onClick={() => {
+                  setBalancePaymentMethod(value);
+                  setReportError("");
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <button
+            type="button"
+            className="primary report-pay"
+            disabled={paying}
+            onClick={() => void paid()}
+          >
+            {paying ? "Recording Payment…" : "Mark as Paid"}
+          </button>
+        </div>
       )}
     </section>
   );
