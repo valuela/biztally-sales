@@ -97,3 +97,21 @@ assert.equal(stockLabel(7, { package_quantity: 5 }), '7 packs');
 assert.equal(stockLabel(7, { package_quantity: 1 }), '7 pcs');
 assert.doesNotMatch(source.text, /Remaining pieces:|Stock will be shared across pieces and packs/);
 console.log('PASS: simple independent item labels without combined piece totals.');
+
+const summary = functions.find(node => node.name?.text === 'DailyStockSummary');
+const countsNode = find(summary, node => ts.isVariableDeclaration(node) && node.name.getText(source) === 'counts');
+const counts = vm.runInNewContext(ts.transpileModule('(' + countsNode.initializer.getText(source) + ')', {
+  compilerOptions: { target: ts.ScriptTarget.ES2022 },
+}).outputText, {
+  rows: [
+    { package_quantity: 1, available: 7, sold: 2 },
+    { package_quantity: 5, available: 2, sold: 1 },
+    { package_quantity: 6, available: 5, sold: 3 },
+    { package_quantity: 5, available: 0, sold: 2 },
+  ],
+});
+assert.equal(counts('available'), '7 pcs · 7 packs');
+assert.equal(counts('sold'), '2 pcs · 6 packs');
+assert.match(source.text, /<DailyStockSummary rows={summaryRows}/);
+assert.match(source.text, /<DailyStockSummary rows={daySummaryRows}/);
+console.log('PASS: shared Sell/Inventory summary totals keep pieces and packs separate.');

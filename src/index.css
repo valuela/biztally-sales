@@ -2579,3 +2579,18 @@ select:focus {
 .backdated-time { display: grid; gap: 6px; font-size: 13px; font-weight: 700; }
 .backdated-time input { width: 100%; min-height: 44px; font-size: 16px; }
 .backdated-time small { font-weight: 400; color: var(--muted); }
+.daily-stock-summary {
+  margin-bottom: 18px;
+  padding: 14px;
+  border: 1px solid #efd8e4;
+  border-radius: 18px;
+  background: #fff9fc;
+}
+.daily-stock-totals { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.daily-stock-totals > div { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.daily-stock-totals span { font-size: 12px; color: #786671; }
+.daily-stock-totals strong { font-size: clamp(14px, 4vw, 18px); color: #a62662; }
+.daily-stock-summary summary { cursor: pointer; min-height: 44px; padding-top: 14px; font-size: 13px; }
+.daily-stock-detail { display: flex; flex-direction: column; gap: 4px; padding: 10px 0; border-top: 1px solid #f0e2e9; }
+.daily-stock-detail b { font-size: 13px; }
+.daily-stock-detail small, .daily-stock-detail span { font-size: 12px; color: #786671; }

@@ -1072,12 +1072,49 @@ function Sell({
     </section>
   );
 }
+type DailyStockRow = {
+  id: number;
+  name: string;
+  package_quantity: number;
+  available: number;
+  sold: number;
+};
+
+function DailyStockSummary({ rows }: { rows: DailyStockRow[] }) {
+  const counts = (field: "available" | "sold") => {
+    const pieces = rows.filter(row => row.package_quantity === 1)
+      .reduce((sum, row) => sum + row[field], 0);
+    const packs = rows.filter(row => row.package_quantity !== 1)
+      .reduce((sum, row) => sum + row[field], 0);
+    return pieces + " pcs · " + packs + " packs";
+  };
+  return (
+    <section className="daily-stock-summary" aria-label="Daily stock summary">
+      <div className="daily-stock-totals">
+        <div><span>Available to sell</span><strong>{counts("available")}</strong></div>
+        <div><span>Sold</span><strong>{counts("sold")}</strong></div>
+      </div>
+      <details>
+        <summary>View per item</summary>
+        {rows.length ? rows.map(row => (
+          <div className="daily-stock-detail" key={row.id}>
+            <b>{row.name} <small>({unitLabel(row)})</small></b>
+            <span>{stockLabel(row.available, row)} left · {stockLabel(row.sold, row)} sold</span>
+          </div>
+        )) : <p>No items added for this date.</p>}
+        <p className="field-hint">Completed sales only. Removed stock is not counted as sold.</p>
+      </details>
+    </section>
+  );
+}
+
 function StockPage({
   business,
   day,
   variants,
   stock,
   offeringStock,
+  summaryRows,
   reload,
 }: {
   business: Business;
@@ -1085,6 +1122,7 @@ function StockPage({
   variants: Variant[];
   stock: Stock[];
   offeringStock: Record<number, number>;
+  summaryRows: DailyStockRow[];
   reload: () => void;
 }) {
   const [open, setOpen] = useState(false),
@@ -1618,6 +1656,7 @@ function StockPage({
       {error && <p className="error page-error" role="alert" aria-live="polite">{error}</p>}
       {!showProducts && (
         <>
+      {day && <DailyStockSummary rows={summaryRows} />}
       {inventoryGroups.length ? (
         <div className="sell-groups">
           {inventoryGroups.map((group, index) => {
@@ -2871,6 +2910,7 @@ export default function App() {
     [reopening, setReopening] = useState(false),
     [stock, setStock] = useState<Stock[]>([]),
     [dayVariantStock, setDayVariantStock] = useState<Record<number, number>>({}),
+    [daySummaryRows, setDaySummaryRows] = useState<DailyStockRow[]>([]),
     [tab, setTab] = useState<"sell" | "stock" | "reports">("sell"),
     [settings, setSettings] = useState(false),
     [online, setOnline] = useState(() => navigator.onLine),
@@ -2905,8 +2945,7 @@ export default function App() {
           .select(
             "id,product_id,name,package_quantity,default_price,is_active,is_bundle,products(id,name)",
           )
-          .eq("business_id", b.id)
-          .eq("is_active", true),
+          .eq("business_id", b.id),
         supabase
           .from("selling_days")
           .select("*")
@@ -2937,7 +2976,7 @@ export default function App() {
             component: byId.get(component.component_variant_id),
           })),
       }));
-      setVariants(enrichedVariants);
+      setVariants(enrichedVariants.filter(item => item.is_active));
       setDay(d.data as Day | null);
       if (d.data) {
         const [s, sold, adjusted, offered] = await Promise.all([
@@ -3009,6 +3048,17 @@ export default function App() {
           ),
         }));
         setStock(available);
+        setDaySummaryRows((offered.data || []).map(item => {
+          const variant = byId.get(Number(item.variant_id));
+          const soldQuantity = soldUnitsByVariant.get(Number(item.variant_id)) || 0;
+          return {
+            id: Number(item.variant_id),
+            name: variant ? (variant.products?.name || "Product") + " · " + variant.name : "Item " + item.variant_id,
+            package_quantity: variant?.package_quantity || 1,
+            available: variant?.is_active ? Math.max(0, Number(item.brought_quantity) - soldQuantity) : 0,
+            sold: soldQuantity,
+          };
+        }).sort((a, b) => a.name.localeCompare(b.name)));
         setDayVariantStock(
           Object.fromEntries(
             (offered.data || []).map((item) => [
@@ -3024,6 +3074,7 @@ export default function App() {
       } else {
         setStock([]);
         setDayVariantStock({});
+        setDaySummaryRows([]);
       }
       setLoadedDate(activeDate);
       } catch (error) {
@@ -3042,6 +3093,7 @@ export default function App() {
     setDay(null);
     setStock([]);
     setDayVariantStock({});
+    setDaySummaryRows([]);
     setSettingsError("");
     setActiveDate(date);
   }
@@ -3212,6 +3264,9 @@ export default function App() {
         {!loadError && loadedDate !== activeDate && tab !== "reports" && (
           <p role="status">Loading {displayDate(activeDate)}…</p>
         )}
+        {loadedDate === activeDate && !loadError && tab === "sell" && day && (
+          <DailyStockSummary rows={daySummaryRows} />
+        )}
         {loadedDate === activeDate && !loadError && tab === "sell" &&
           (variants.length === 0 ? (
             <Empty
@@ -3253,6 +3308,7 @@ export default function App() {
             variants={variants}
             stock={stock}
             offeringStock={dayVariantStock}
+            summaryRows={daySummaryRows}
             reload={() => void load()}
           />
         )}{" "}
