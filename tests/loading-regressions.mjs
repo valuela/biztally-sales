@@ -76,3 +76,24 @@ assert.equal(remaining({ id: 1 }), 2, 'Loose pieces must not include pack conten
 assert.equal(remaining({ id: 2 }), 0, 'Unselected flavors must not appear as loose stock');
 assert.equal(remaining({ id: 3 }), 4, 'Mixed packs must count as packs, not pieces');
 console.log('PASS: Inventory displays 2 loose pieces and 4 mixed packs, not 26 total pieces.');
+
+const sell = functions.find(node => node.name?.text === 'Sell');
+const availabilityNode = find(sell, node => ts.isFunctionDeclaration(node) && node.name?.text === 'availableFor');
+const availableFor = vm.runInNewContext(ts.transpileModule('(' + availabilityNode.getText(source) + ')', {
+  compilerOptions: { target: ts.ScriptTarget.ES2022 },
+}).outputText, { offeringStock: { 3: 5, 4: 2 }, cart: {} });
+assert.equal(availableFor({ id: 3 }, { 4: { quantity: 2 } }), 5, 'Nuts packs must not reduce mixed packs');
+assert.equal(availableFor({ id: 4 }, { 4: { quantity: 2 } }), 0, 'Cannot exceed this pack count');
+assert.equal(availableFor({ id: 3 }, { 3: { quantity: 5 } }), 0);
+assert.match(source.text, /variants\.filter\(variant => Object\.hasOwn\(dayVariantStock, variant\.id\)\)/,
+  'Keep zero-stock offerings visible without including unselected products');
+console.log('PASS: independent pack selection and persistent sold-out offerings.');
+
+const stockLabelNode = find(source, node => ts.isVariableDeclaration(node) && node.name.getText(source) === 'stockLabel');
+const stockLabel = vm.runInNewContext(ts.transpileModule('(' + stockLabelNode.initializer.getText(source) + ')', {
+  compilerOptions: { target: ts.ScriptTarget.ES2022 },
+}).outputText);
+assert.equal(stockLabel(7, { package_quantity: 5 }), '7 packs');
+assert.equal(stockLabel(7, { package_quantity: 1 }), '7 pcs');
+assert.doesNotMatch(source.text, /Remaining pieces:|Stock will be shared across pieces and packs/);
+console.log('PASS: simple independent item labels without combined piece totals.');

@@ -59,35 +59,26 @@ begin
   end;
   if not rejected then raise exception 'Nonmember started day'; end if;
   perform set_config('request.jwt.claim.sub',original_user,true);
-  -- Prepared counts, not a legacy combined piece balance, control deductions.
+  -- Simulate a legacy piece ledger that disagrees with the prepared stock.
   update public.daily_stock set brought_quantity=1 where selling_day_id=d;
-  perform public.remove_prepared_stock(d,pack,1,'correction');
-  if (select count(*) from public.stock_adjustments
-      where selling_day_id=d and kind='correction' and quantity_delta=-3) <> 2 then
-    raise exception 'Mistake reason was not saved as a correction for both flavors';
+  insert into public.sale_commands(id,business_id,selling_day_id,is_walk_in,payment_status,amount_paid,payment_method,items)
+    values (gen_random_uuid(),b,d,true,'paid',40,'cash',
+      jsonb_build_array(jsonb_build_object('variant_id',a,'quantity',2,'unit_price',20)));
+  if (select brought_quantity from public.selling_day_variants where selling_day_id=d and variant_id=pack) <> 4 then
+    raise exception 'Another option changed prepared pack stock';
   end if;
-  if (select brought_quantity from public.selling_day_variants where selling_day_id=d and variant_id=pack) <> 3
-    or (select sum(quantity_delta) from public.stock_adjustments where selling_day_id=d and variant_id=a) <> -3
-    or (select sum(quantity_delta) from public.stock_adjustments where selling_day_id=d and variant_id=c) <> -3
-    or (select brought_quantity from public.selling_day_variants where selling_day_id=d and variant_id=a) <> 2 then
-    raise exception 'Partial removal did not preserve the other packs and loose pieces';
-  end if;
-  perform public.remove_prepared_stock(d,pack,3,'returned_home');
-  if (select brought_quantity from public.selling_day_variants where selling_day_id=d and variant_id=pack) <> 0
-    or (select brought_quantity from public.selling_day_variants where selling_day_id=d and variant_id=a) <> 2
-    or (select sum(quantity_delta) from public.stock_adjustments where selling_day_id=d and variant_id=a) <> -12
-    or (select sum(quantity_delta) from public.stock_adjustments where selling_day_id=d and variant_id=c) <> -12 then
-    raise exception 'Pack removal changed unrelated loose pieces or miscounted components';
-  end if;
+  insert into public.sale_commands(id,business_id,selling_day_id,is_walk_in,payment_status,amount_paid,payment_method,items)
+    values (gen_random_uuid(),b,d,true,'paid',440,'cash',
+      jsonb_build_array(jsonb_build_object('variant_id',pack,'quantity',4,'unit_price',110)));
   rejected := false;
-  begin perform public.remove_prepared_stock(d,pack,1,'returned_home');
+  begin
+    insert into public.sale_commands(id,business_id,selling_day_id,is_walk_in,payment_status,amount_paid,payment_method,items)
+      values (gen_random_uuid(),b,d,true,'paid',110,'cash',
+        jsonb_build_array(jsonb_build_object('variant_id',pack,'quantity',1,'unit_price',110)));
   exception when raise_exception then rejected := true;
   end;
-  if not rejected then raise exception 'Removed more packs than available'; end if;
-  perform public.remove_prepared_stock(d,a,2,'giveaway');
-  if (select sum(quantity_delta) from public.stock_adjustments where selling_day_id=d and variant_id=a) <> -14 then
-    raise exception 'Loose-piece removal miscounted';
-  end if;
+  if not rejected then raise exception 'Prepared pack overselling allowed'; end if;
 end $$;
 rollback;
-select 'Prepared stock removal: pack contents, loose pieces and over-removal checks passed' as result;
+select 'Independent stock: sale completion, separate prepared counts and oversell rejection passed' as result;
+

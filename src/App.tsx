@@ -129,7 +129,7 @@ const stockLabel = (
 ) =>
   variant.package_quantity === 1
     ? `${quantity} pcs`
-    : `${quantity} ${quantity === 1 ? "pack" : "packs"} (${quantity * variant.package_quantity} pcs)`;
+    : `${quantity} ${quantity === 1 ? "pack" : "packs"}`;
 const componentDemand = (variant: Variant, quantity: number) =>
   variant.is_bundle
     ? (variant.components || []).map((component) => ({
@@ -623,7 +623,6 @@ function Sell({
   day,
   variants,
   offeringStock,
-  stock,
   reload,
 }: {
   business: Business;
@@ -631,7 +630,6 @@ function Sell({
   day: Day;
   variants: Variant[];
   offeringStock: Record<number, number>;
-  stock: Stock[];
   reload: () => void;
 }) {
   const [cart, setCart] = useState<Record<number, Cart>>({}),
@@ -654,40 +652,9 @@ function Sell({
     () => groupVariantsByProduct(variants),
     [variants],
   );
-  const stockByVariant = useMemo(
-    () => new Map(stock.map((item) => [item.variant_id, item.brought_quantity])),
-    [stock],
-  );
-  function reservedDemand(current: Record<number, Cart>) {
-    const reserved = new Map<number, number>();
-    for (const item of Object.values(current))
-      for (const component of componentDemand(item.variant, item.quantity))
-        reserved.set(
-          component.component_variant_id,
-          (reserved.get(component.component_variant_id) || 0) +
-            component.quantity,
-        );
-    return reserved;
-  }
   function availableFor(variant: Variant, current = cart) {
     const picked = current[variant.id]?.quantity || 0;
-    const recipe = componentDemand(variant, 1);
-    const reserved = reservedDemand(current);
-    const componentAvailable = recipe.length
-      ? Math.min(
-          ...recipe.map((component) =>
-            Math.floor(
-              ((stockByVariant.get(component.component_variant_id) || 0) -
-                (reserved.get(component.component_variant_id) || 0)) /
-                component.quantity,
-            ),
-          ),
-        )
-      : 0;
-    return Math.max(
-      0,
-      Math.min((offeringStock[variant.id] || 0) - picked, componentAvailable),
-    );
+    return Math.max(0, (offeringStock[variant.id] || 0) - picked);
   }  useEffect(() => {
     const t = setTimeout(async () => {
       if (!supabase || name.trim().length < 2 || customer)
@@ -842,7 +809,7 @@ function Sell({
                       )}
                       <small>
                         <strong>{php.format(v.default_price)}</strong>
-                        <span className={remaining <= 2 ? "low-stock" : ""}> · {remaining === 0 ? "Sold out" : remaining <= 2 ? "Only " + stockLabel(remaining, v) + " left" : stockLabel(remaining, v) + " left"}</span>
+                        <span className={remaining <= 2 ? "low-stock" : ""}> · {remaining === 0 ? (picked ? "All remaining in this sale" : "Sold out") : remaining <= 2 ? "Only " + stockLabel(remaining, v) + " left" : stockLabel(remaining, v) + " left"}</span>
                       </small>
                     </div>
                     <div
@@ -1153,15 +1120,7 @@ function StockPage({
   const selectedTodayCount = missingToday.filter(
     (item) => (addQty[item.id] || 0) > 0,
   ).length;
-  const remainingByVariant = new Map(
-    stock.map((item) => [item.variant_id, item.brought_quantity]),
-  );
-  const sellingRemaining = (item: Variant) => {
-    const recipe = componentDemand(item, 1);
-    return Math.max(0, Math.min(offeringStock[item.id] || 0,
-      recipe.length ? Math.min(...recipe.map(component =>
-        Math.floor((remainingByVariant.get(component.component_variant_id) || 0) / component.quantity))) : 0));
-  };
+  const sellingRemaining = (item: Variant) => Math.max(0, offeringStock[item.id] || 0);
   const inventoryGroups = groupVariantsByProduct(variants.filter(item => sellingRemaining(item) > 0));
   const activeCatalogCount = catalog.filter((item) => item.is_active).length;
   const catalogGroups = useMemo(
@@ -1522,16 +1481,12 @@ function StockPage({
       .eq("business_id", business.id);
     if (error) return setError(error.message);
     if (day && remaining > 0) {
-      const { error: stockError } = await supabase
-        .from("stock_adjustments")
-        .insert({
-          business_id: business.id,
-          selling_day_id: day.id,
-          variant_id: variant.id,
-          kind: "returned_home",
-          quantity_delta: -remaining,
-          note: "Removed product from list",
-        });
+      const { error: stockError } = await supabase.rpc("remove_prepared_stock", {
+        p_selling_day_id: day.id,
+        p_variant_id: variant.id,
+        p_quantity: remaining,
+        p_kind: "returned_home",
+      });
       if (stockError) return setError(stockError.message);
     }
     setEditing(null);
@@ -1838,7 +1793,7 @@ function StockPage({
                 </header>
                 <div className="sell-variants">
                   {group.variants.map((item) => {
-                    const remaining = remainingByVariant.get(item.id) || 0;
+                    const remaining = sellingRemaining(item);
                     return (
                       <article className="product-list-variant" key={item.id}>
                         <div className="sell-variant-copy">
@@ -1940,7 +1895,7 @@ function StockPage({
               </button>
             </div>
             <p className="sheet-note">
-              Define the contents once. Stock will be shared across pieces and packs.
+              Describe what is inside one pack. Each selling option has its own quantity.
             </p>
             <label>
               Product
@@ -2152,7 +2107,7 @@ function StockPage({
                   onClick={() =>
                     void archiveVariant(
                       editing,
-                      remainingByVariant.get(editing.id) || 0,
+                      sellingRemaining(editing),
                     )
                   }
                 >
@@ -3149,11 +3104,14 @@ export default function App() {
     const unpaid = daySales
       .filter((sale) => sale.payment_status === "unpaid")
       .reduce((sum, sale) => sum + balanceDue(sale), 0);
-    const remaining = stock.reduce((sum, item) => sum + item.brought_quantity, 0);
+    const remaining = variants
+      .filter(item => (dayVariantStock[item.id] || 0) > 0)
+      .map(item => (item.products?.name || "Product") + " · " + item.name + ": " +
+        stockLabel(dayVariantStock[item.id], item)).join("\n") || "None";
     const confirmed = window.confirm(
       "Finish " + displayDate(activeDate) + "?\n\nSales: " + php.format(salesTotal) +
       "\nOutstanding: " + php.format(unpaid) +
-      "\nRemaining pieces: " + remaining +
+      "\n\nRemaining items:\n" + remaining +
       "\n\nThis closes the selected date. You can explicitly reopen it if you missed a sale.",
     );
     if (!confirmed) {
@@ -3274,27 +3232,8 @@ export default function App() {
               business={business}
               userId={session.user.id}
               day={day}
-              variants={
-                Object.keys(dayVariantStock).length
-                  ? variants.filter((variant) => {
-                      if ((dayVariantStock[variant.id] || 0) < 1) return false;
-                      const recipe = componentDemand(variant, 1);
-                      return (
-                        recipe.length > 0 &&
-                        recipe.every((component) =>
-                          stock.some(
-                            (item) =>
-                              item.variant_id ===
-                                component.component_variant_id &&
-                              item.brought_quantity >= component.quantity,
-                          ),
-                        )
-                      );
-                    })
-                  : variants
-              }
+              variants={variants.filter(variant => Object.hasOwn(dayVariantStock, variant.id))}
               offeringStock={dayVariantStock}
-              stock={stock}
               reload={() => void load()}
             />
           ) : (
