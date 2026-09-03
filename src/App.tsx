@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type FormEvent,
 } from "react";
@@ -50,7 +51,7 @@ type VariantComponent = {
   quantity: number;
   component?: Variant;
 };
-type Day = { id: number; sale_date: string; closed_at?: string | null };
+type Day = { id: number; sale_date: string; status?: string; closed_at?: string | null };
 type Stock = {
   id: number;
   variant_id: number;
@@ -116,6 +117,10 @@ const today = () =>
   new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Manila" }).format(
     new Date(),
   );
+const displayDate = (date: string) =>
+  new Intl.DateTimeFormat("en-PH", {
+    month: "short", day: "numeric", year: "numeric", timeZone: "Asia/Manila",
+  }).format(new Date(date + "T12:00:00+08:00"));
 const unitLabel = (variant: Pick<Variant, "package_quantity">) =>
   variant.package_quantity === 1 ? "1 pc" : `${variant.package_quantity} pcs`;
 const stockLabel = (
@@ -304,10 +309,12 @@ function StartDay({
   business,
   variants,
   done,
+  saleDate,
 }: {
   business: Business;
   variants: Variant[];
   done: () => void;
+  saleDate: string;
 }) {
   const [q, setQ] = useState<Record<number, number>>({}),
     [error, setError] = useState(""),
@@ -332,63 +339,36 @@ function StartDay({
     if (!supabase || starting) return;
     if (!chosen.length) return setError("Add at least one item.");
     setStarting(true);
-    const demand = new Map<number, number>();
-    for (const item of chosen) {
-      const recipe = componentDemand(item, q[item.id] || 0);
-      if (item.is_bundle && !recipe.length) {
-        setStarting(false);
-        return setError(
-          item.name + " needs a pack recipe before it can be stocked.",
-        );
+    setError("");
+    try {
+      const { error } = await supabase.rpc("start_selling_day", {
+        p_business_id: business.id,
+        p_sale_date: saleDate,
+        p_items: chosen.map((item) => ({
+          variant_id: item.id,
+          quantity: q[item.id] || 0,
+        })),
+      });
+      if (error) {
+        setError(error.code === "23505"
+          ? "This day has already been started. Reload the page to see its stock."
+          : error.message);
+        return;
       }
-      for (const component of recipe)
-        demand.set(
-          component.component_variant_id,
-          (demand.get(component.component_variant_id) || 0) +
-            component.quantity,
-        );
-    }
-    const d = await supabase
-      .from("selling_days")
-      .insert({ business_id: business.id, sale_date: today() })
-      .select()
-      .single();
-    if (d.error) {
+      done();
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Unable to start the day. Reload to check whether it saved before trying again.");
+    } finally {
       setStarting(false);
-      return setError(d.error.message);
     }
-    const r = await supabase.from("daily_stock").insert(
-      [...demand.entries()].map(([variant_id, brought_quantity]) => ({
-        business_id: business.id,
-        selling_day_id: d.data.id,
-        variant_id,
-        brought_quantity,
-      })),
-    );
-    if (r.error) {
-      setStarting(false);
-      setError(r.error.message);
-      return;
-    }
-    const offeringResult = await supabase.from("selling_day_variants").insert(
-      chosen.map((item) => ({
-        selling_day_id: d.data.id,
-        variant_id: item.id,
-        brought_quantity: q[item.id] || 0,
-      })),
-    );
-    if (offeringResult.error) {
-      setStarting(false);
-      setError(offeringResult.error.message);
-    } else done();
   }
 
   return (
     <section>
       <Heading
-        label="Good morning"
+        label={saleDate === today() ? "Good morning" : displayDate(saleDate)}
         title="What did you bring?"
-        text="Enter how many pieces or packs you brought."
+        text={saleDate === today() ? "Enter how many pieces or packs you brought." : "Enter the pieces or packs you brought on this date. Today's stock will not change."}
       />
       <div className="sell-groups start-groups">
         {productGroups.map((group, groupIndex) => {
@@ -475,6 +455,7 @@ function StartDay({
             <div className="sheethead review-stock-head">
               <div>
                 <h2 id="review-stock-title">Review what you brought</h2>
+                <p>Selling date: {displayDate(saleDate)}</p>
                 <p>
                   {chosen.length} selected {chosen.length === 1 ? "option" : "options"}
                 </p>
@@ -655,6 +636,7 @@ function Sell({
 }) {
   const [cart, setCart] = useState<Record<number, Cart>>({}),
     [review, setReview] = useState(false),
+    [saleTime, setSaleTime] = useState("12:00"),
     [name, setName] = useState(""),
     [customer, setCustomer] = useState<Customer | null>(null),
     [suggestions, setSuggestions] = useState<Customer[]>([]),
@@ -754,6 +736,8 @@ function Sell({
   async function save() {
     if (!supabase || saving) return;
     if (!lines.length) return setError("Add at least one item.");
+    if (day.sale_date < today() && !/^([01]\d|2[0-3]):[0-5]\d$/.test(saleTime))
+      return setError("Enter a valid sale time.");
     if (!walkIn && !name.trim()) return setError("Enter a customer name.");
     const enteredPartial = Number(partialAmount);
     if (payment === "partial" &&
@@ -768,6 +752,7 @@ function Sell({
         id: crypto.randomUUID(),
         business_id: business.id,
         selling_day_id: day.id,
+        sale_time: day.sale_date < today() ? saleTime : null,
         customer_id: customer?.id || null,
         customer_name: walkIn ? null : name.trim(),
         is_walk_in: walkIn,
@@ -814,7 +799,7 @@ function Sell({
   return (
     <section>
       <Heading
-        label="Today"
+        label={day.sale_date === today() ? "Today" : displayDate(day.sale_date)}
         title="New sale"
         text="Choose a product, then adjust its flavor or pack."
       />
@@ -906,12 +891,21 @@ function Sell({
             <div className="sheethead review-sale-head">
               <div>
                 <h2 id="review-sale-title">Review Sale</h2>
+                <p>Selling date: {displayDate(day.sale_date)}</p>
                 <p>{lines.reduce((sum, line) => sum + line.quantity, 0)} items · {php.format(total)}</p>
               </div>
               <button type="button" disabled={saving} aria-label="Close sale review" onClick={() => setReview(false)}>
                 <X aria-hidden="true" />
               </button>
             </div>
+            {day.sale_date < today() && (
+              <label className="backdated-time">
+                Sale time (Philippines)
+                <input type="time" value={saleTime} required
+                  onChange={(event) => setSaleTime(event.target.value)} />
+                <small>Defaults to 12:00 noon. Change it if you know the time.</small>
+              </label>
+            )}
             <div className="review-sale-list">
               {lines.map((l) => (
                 <article className="review-sale-row" key={l.variant.id}>
@@ -1245,12 +1239,12 @@ function StockPage({
       return setError("Enter a valid price.");
     const parsedTodayQty = Number(todayQty);
     if (day && (!Number.isInteger(parsedTodayQty) || parsedTodayQty < 0))
-      return setError("Enter a whole number for today's quantity.");
+      return setError("Enter a whole number for the selected day's quantity.");
     if (
       day &&
       parsedTodayQty > 0 &&
       !window.confirm(
-        `Save ${productName} ${variantName} and add ${stockLabel(parsedTodayQty, { package_quantity: parsedPackageQty })} to today?`,
+        `Save ${productName} ${variantName} and add ${stockLabel(parsedTodayQty, { package_quantity: parsedPackageQty })} to ${displayDate(day.sale_date)}?`,
       )
     )
       return;
@@ -1375,7 +1369,7 @@ function StockPage({
           addQty[item.id],
       )
       .join("\n");
-    if (!window.confirm("Add these items to today?\n\n" + summary)) return;
+    if (!window.confirm("Add these items to " + displayDate(day.sale_date) + "?\n\n" + summary)) return;
 
     setAddingToday(true);
     const componentTotals = new Map<number, number>();
@@ -1476,7 +1470,7 @@ function StockPage({
       variant_id: item.variant_id,
       kind: kinds[reason],
       quantity_delta: -item.brought_quantity,
-      note: "Removed from today's stock as " + reason,
+      note: "Removed from selected day's stock as " + reason,
     });
     if (error) setError(error.message);
     else refresh();
@@ -1638,7 +1632,7 @@ function StockPage({
       <div className="heading split">
         <div>
           <p className="eyebrow">Inventory</p>
-          <h1>{showProducts ? "Product list" : "Today’s stock"}</h1>
+          <h1>{showProducts ? "Product list" : day && day.sale_date !== today() ? "Stock · " + displayDate(day.sale_date) : "Daily stock"}</h1>
           <span>
             {showProducts
               ? `${activeCatalogCount} active · ${catalog.length - activeCatalogCount} inactive`
@@ -1683,7 +1677,7 @@ function StockPage({
                     disabled={!day || s.brought_quantity < 1}
                     onClick={() => removeFromToday(s)}
                   >
-                    Remove today
+                    Remove from day
                   </button>
                 </div>
               </div>
@@ -1695,8 +1689,8 @@ function StockPage({
           title="No stock yet"
           text={
             day
-              ? "Add an item to today's stock."
-              : "Add products, then start today from Sell."
+              ? "Add an item to this day's stock."
+              : "Add products, then start the selected date from Sell."
           }
           action={
             <button className="secondary" onClick={() => setOpen(true)}>
@@ -1709,7 +1703,7 @@ function StockPage({
         <section className="block add-today">
           <Heading
             label="Forgot something?"
-            title="Add to today"
+            title={day.sale_date === today() ? "Add to today" : "Add to " + displayDate(day.sale_date)}
             text="Set quantities, then add everything once."
           />
           <div className="sell-groups start-groups">
@@ -1797,7 +1791,7 @@ function StockPage({
               {addingToday
                 ? "Adding…"
                 : selectedTodayCount
-                  ? "Add " + selectedTodayCount + " selected to today"
+                  ? "Add " + selectedTodayCount + " selected to this day"
                   : "Choose quantities to add"}
             </button>
           </div>
@@ -1844,7 +1838,7 @@ function StockPage({
                           >
                             {item.is_active ? "Active" : "Inactive"}
                             {remaining > 0
-                              ? ` · ${stockLabel(remaining, item)} left today`
+                              ? ` · ${stockLabel(remaining, item)} left on this date`
                               : ""}
                           </span>
                         </div>
@@ -2002,7 +1996,7 @@ function StockPage({
             </label>
             {day && (
               <label>
-                Quantity for today
+                Quantity for selected date
                 <input
                   inputMode="numeric"
                   pattern="[0-9]*"
@@ -2184,10 +2178,11 @@ function CustomerMerge({ business }: { business: Business }) {
     </div>
   );
 }
-function Reports({ business, userId }: { business: Business; userId: string }) {
+function Reports({ business, userId, initialDate }: { business: Business; userId: string; initialDate: string }) {
+  const reportRequests = useRef({ version: 0 });
   const [view, setView] = useState<"daily" | "outstanding">("daily"),
     [period, setPeriod] = useState<"day" | "week" | "month">("day"),
-    [selectedDate, setSelectedDate] = useState(today()),
+    [selectedDate, setSelectedDate] = useState(initialDate),
     [sales, setSales] = useState<Sale[]>([]),
     [selected, setSelected] = useState<string[]>([]),
     [expandedCustomer, setExpandedCustomer] = useState<string | null>(null),
@@ -2227,8 +2222,11 @@ function Reports({ business, userId }: { business: Business; userId: string }) {
   }, [period, selectedDate]);
   const load = useCallback(async () => {
     if (!supabase) return;
+    const request = ++reportRequests.current.version;
     setLoadingReports(true);
     setReportError("");
+    setSales([]);
+    try {
     let query = supabase
       .from("sales")
       .select(
@@ -2245,14 +2243,22 @@ function Reports({ business, userId }: { business: Business; userId: string }) {
       query = query.eq("payment_status", "unpaid");
     }
     const { data, error } = await query;
+    if (request !== reportRequests.current.version) return;
     if (error) setReportError(error.message);
     setSales((data || []) as Sale[]);
     setLoadingReports(false);
+    } catch (error) {
+      if (request !== reportRequests.current.version) return;
+      setReportError(error instanceof Error ? error.message : "Unable to load reports. Please try again.");
+      setLoadingReports(false);
+    }
   }, [business.id, dateRange, view]);
   useEffect(() => {
+    const requests = reportRequests.current;
     setSelected([]);
     setExpandedCustomer(null);
     void load();
+    return () => { ++requests.version; };
   }, [load]);
   const total = useMemo(
     () =>
@@ -2844,6 +2850,10 @@ export default function App() {
     [business, setBusiness] = useState<Business | null>(null),
     [variants, setVariants] = useState<Variant[]>([]),
     [day, setDay] = useState<Day | null>(null),
+    [activeDate, setActiveDate] = useState(today),
+    [loadedDate, setLoadedDate] = useState<string | null>(null),
+    [loadError, setLoadError] = useState(""),
+    [reopening, setReopening] = useState(false),
     [stock, setStock] = useState<Stock[]>([]),
     [dayVariantStock, setDayVariantStock] = useState<Record<number, number>>({}),
     [tab, setTab] = useState<"sell" | "stock" | "reports">("sell"),
@@ -2852,6 +2862,8 @@ export default function App() {
     [finishingDay, setFinishingDay] = useState(false),
     [resettingDay, setResettingDay] = useState(false),
     [settingsError, setSettingsError] = useState("");
+  const loadVersion = useRef(0);
+  const activeDateRef = useRef(activeDate);
   const loadBusiness = useCallback(async () => {
     if (!supabase) return null;
     const { data } = await supabase
@@ -2866,8 +2878,12 @@ export default function App() {
   const load = useCallback(
     async (arg?: Business | null) => {
       if (!supabase) return;
+      if (activeDate !== activeDateRef.current) return;
       const b = arg || business;
       if (!b) return;
+      const version = ++loadVersion.current;
+      setLoadError("");
+      try {
       const [v, d, componentResult] = await Promise.all([
         supabase
           .from("product_variants")
@@ -2880,13 +2896,16 @@ export default function App() {
           .from("selling_days")
           .select("*")
           .eq("business_id", b.id)
-          .eq("sale_date", today())
+          .eq("sale_date", activeDate)
           .maybeSingle(),
         supabase
           .from("variant_components")
           .select("bundle_variant_id,component_variant_id,quantity")
           .eq("business_id", b.id),
       ]);
+      if (version !== loadVersion.current) return;
+      if (v.error || d.error || componentResult.error)
+        throw new Error(v.error?.message || d.error?.message || componentResult.error?.message);
       const rawVariants = (v.data || []) as unknown as Variant[];
       const componentRows = (componentResult.data || []) as {
         bundle_variant_id: number;
@@ -2930,6 +2949,9 @@ export default function App() {
             .select("variant_id,brought_quantity")
             .eq("selling_day_id", d.data.id),
         ]);
+        if (version !== loadVersion.current) return;
+        if (s.error || sold.error || adjusted.error || offered.error)
+          throw new Error(s.error?.message || sold.error?.message || adjusted.error?.message || offered.error?.message);
         const soldByVariant = new Map<number, number>();
         const soldUnitsByVariant = new Map<number, number>();
         for (const row of sold.data || []) {
@@ -2988,9 +3010,41 @@ export default function App() {
         setStock([]);
         setDayVariantStock({});
       }
+      setLoadedDate(activeDate);
+      } catch (error) {
+        if (version === loadVersion.current)
+          setLoadError(error instanceof Error ? error.message : "Unable to load this selling date. Please try again.");
+      }
     },
-    [business],
+    [business, activeDate],
   );
+  function changeSellingDate(date: string) {
+    if (!date || date > today() || date === activeDate) return;
+    if (!window.confirm("Switch to " + displayDate(date) + "? Any unsubmitted selections will be cleared.")) return;
+    ++loadVersion.current;
+    activeDateRef.current = date;
+    setLoadedDate(null);
+    setDay(null);
+    setStock([]);
+    setDayVariantStock({});
+    setSettingsError("");
+    setActiveDate(date);
+  }
+  async function reopenDay() {
+    if (!supabase || !day || reopening) return;
+    if (!window.confirm("Reopen " + displayDate(day.sale_date) + " to add missed sales? Existing sales and stock will be preserved.")) return;
+    setReopening(true);
+    setLoadError("");
+    try {
+      const { error } = await supabase.rpc("reopen_selling_day", { p_selling_day_id: day.id });
+      if (error) throw error;
+      await load();
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : "Could not reopen this day. Please try again.");
+    } finally {
+      setReopening(false);
+    }
+  }
   useEffect(() => {
     if (!supabase) return setLoading(false);
     supabase.auth.getSession().then(({ data }) => {
@@ -3001,9 +3055,12 @@ export default function App() {
       .subscription.unsubscribe;
   }, []);
   useEffect(() => {
-    if (session) void loadBusiness().then(load);
+    if (session) void loadBusiness();
     else setBusiness(null);
-  }, [session, loadBusiness, load]);
+  }, [session, loadBusiness]);
+  useEffect(() => {
+    void load();
+  }, [load]);
   useEffect(() => {
     const updateOnline = () => setOnline(navigator.onLine);
     window.addEventListener("online", updateOnline);
@@ -3019,7 +3076,7 @@ export default function App() {
     setSettingsError("");
     const { data, error } = await supabase
       .from("sales")
-      .select("total,payment_status")
+      .select("total,amount_paid,payment_status")
       .eq("selling_day_id", day.id)
       .is("voided_at", null);
     if (error) {
@@ -3027,17 +3084,17 @@ export default function App() {
       setFinishingDay(false);
       return;
     }
-    const daySales = (data || []) as { total: number; payment_status: string }[];
+    const daySales = (data || []) as { total: number; amount_paid: number; payment_status: string }[];
     const salesTotal = daySales.reduce((sum, sale) => sum + Number(sale.total), 0);
     const unpaid = daySales
       .filter((sale) => sale.payment_status === "unpaid")
-      .reduce((sum, sale) => sum + Number(sale.total), 0);
+      .reduce((sum, sale) => sum + balanceDue(sale), 0);
     const remaining = stock.reduce((sum, item) => sum + item.brought_quantity, 0);
     const confirmed = window.confirm(
-      "Finish today?\n\nSales: " + php.format(salesTotal) +
+      "Finish " + displayDate(activeDate) + "?\n\nSales: " + php.format(salesTotal) +
       "\nOutstanding: " + php.format(unpaid) +
       "\nRemaining pieces: " + remaining +
-      "\n\nYou will no longer be able to add sales today.",
+      "\n\nThis closes the selected date. You can explicitly reopen it if you missed a sale.",
     );
     if (!confirmed) {
       setFinishingDay(false);
@@ -3056,7 +3113,7 @@ export default function App() {
   }  async function resetDay() {
     if (!supabase || !business || !day || resettingDay) return;
     const confirmed = window.confirm(
-      "Reset today and return to Start Day? This removes today's starting stock and stock changes. You cannot reset after recording a sale.",
+      "Reset " + displayDate(activeDate) + " and return to Start Day? This removes that date's starting stock and stock changes. You cannot reset after recording a sale.",
     );
     if (!confirmed) return;
     setResettingDay(true);
@@ -3118,7 +3175,26 @@ export default function App() {
       </header>
       {!online && <div className="offline-banner" role="status"><WifiOff aria-hidden="true" /> Offline — sales will not be submitted until you reconnect.</div>}
       <main>
-        {tab === "sell" &&
+        {tab !== "reports" && (
+          <div className={"selling-date-bar" + (activeDate !== today() ? " historical" : "")}>
+            <label htmlFor="selling-date"><CalendarDays aria-hidden="true" /> Selling date</label>
+            <input id="selling-date" type="date" value={activeDate} max={today()}
+              disabled={reopening} onChange={(event) => changeSellingDate(event.target.value)} />
+            {activeDate !== today() && <>
+              <small>Entering sales and stock for {displayDate(activeDate)} only.</small>
+              <button type="button" className="secondary compact" onClick={() => changeSellingDate(today())}>Back to today</button>
+            </>}
+          </div>
+        )}
+        {loadError && tab !== "reports" && (
+          <div role="alert"><p className="error">{loadError}</p>
+            <button type="button" className="secondary" onClick={() => void load()}>Retry loading this date</button>
+          </div>
+        )}
+        {!loadError && loadedDate !== activeDate && tab !== "reports" && (
+          <p role="status">Loading {displayDate(activeDate)}…</p>
+        )}
+        {loadedDate === activeDate && !loadError && tab === "sell" &&
           (variants.length === 0 ? (
             <Empty
               title="Add your first product"
@@ -3129,10 +3205,12 @@ export default function App() {
                 </button>
               }
             />
-          ) : day?.closed_at ? (
-            <Empty title="Day Finished" text="Today is closed. Review your totals in Reports; tomorrow starts with a fresh Start Day." action={<button type="button" className="secondary" onClick={() => setTab("reports")}>View Reports</button>} />
+          ) : day && (day.closed_at || day.status === "closed") ? (
+            <Empty title="Day Finished" text={displayDate(activeDate) + " is closed. Reopen it to enter missed sales without resetting its stock."}
+              action={<button type="button" className="secondary" disabled={reopening} onClick={() => void reopenDay()}>{reopening ? "Reopening…" : "Reopen to add missed sales"}</button>} />
           ) : day ? (
             <Sell
+              key={activeDate}
               business={business}
               userId={session.user.id}
               day={day}
@@ -3161,13 +3239,16 @@ export default function App() {
             />
           ) : (
             <StartDay
+              key={activeDate}
+              saleDate={activeDate}
               business={business}
               variants={variants}
               done={() => void load()}
             />
           ))}
-        {tab === "stock" && (
+        {loadedDate === activeDate && !loadError && tab === "stock" && (
           <StockPage
+            key={activeDate}
             business={business}
             day={day}
             variants={variants}
@@ -3176,7 +3257,7 @@ export default function App() {
           />
         )}{" "}
         {tab === "reports" && (
-          <Reports business={business} userId={session.user.id} />
+          <Reports business={business} userId={session.user.id} initialDate={activeDate} />
         )}
       </main>
       <nav aria-label="Primary navigation">
@@ -3214,7 +3295,7 @@ export default function App() {
               <p>Share this with your other account.</p>
             </div>
             <div className="settings-tool finish-day">
-              <div><CheckCircle2 aria-hidden="true" /><span><b>Finish today</b><p>Review sales, outstanding balances, and remaining stock, then close selling for today.</p></span></div>
+              <div><CheckCircle2 aria-hidden="true" /><span><b>Finish {displayDate(activeDate)}</b><p>Review sales, outstanding balances, and remaining stock for the selected date.</p></span></div>
               <button type="button" className="primary" disabled={!day || Boolean(day.closed_at) || finishingDay} onClick={() => void finishDay()}>
                 {finishingDay ? "Finishing…" : day?.closed_at ? "Day finished" : day ? "Finish day" : "Day not started"}
               </button>
@@ -3240,7 +3321,7 @@ export default function App() {
                 {resettingDay
                   ? "Resetting…"
                   : day
-                    ? "Reset today"
+                    ? "Reset " + displayDate(activeDate)
                     : "Day not started"}
               </button>
             </div>

@@ -2546,3 +2546,36 @@ select:focus {
   font-size: 11px !important;
   font-weight: 700;
 }
+
+.selling-date-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 175px);
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 18px;
+  padding: 12px;
+  border: 1px solid #efd8e2;
+  border-radius: 16px;
+  background: #fff;
+}
+
+.selling-date-bar.historical {
+  background: #fff0f6;
+  border-color: #d68eac;
+}
+
+.selling-date-bar label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.selling-date-bar label svg { width: 18px; height: 18px; flex-shrink: 0; }
+.selling-date-bar input { width: 100%; min-width: 0; min-height: 44px; font-size: 16px; }
+.selling-date-bar small { color: #8d365b; font-size: 12px; }
+.selling-date-bar button { min-height: 44px; }
+.backdated-time { display: grid; gap: 6px; font-size: 13px; font-weight: 700; }
+.backdated-time input { width: 100%; min-height: 44px; font-size: 16px; }
+.backdated-time small { font-weight: 400; color: var(--muted); }
