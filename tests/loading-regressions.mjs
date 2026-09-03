@@ -60,3 +60,19 @@ pending[2]({ data: ['unmounted view'], error: null });
 await abandoned;
 assert.equal(state.sales.length, 0, 'Cleanup invalidates abandoned results');
 console.log('PASS: separate loading effects; stale report data/errors ignored; abandoned view ignored.');
+
+const inventory = functions.find(node => node.name?.text === 'StockPage');
+const remainingNode = find(inventory, node => ts.isVariableDeclaration(node) && node.name.getText(source) === 'sellingRemaining');
+const remaining = vm.runInNewContext(ts.transpileModule('(' + remainingNode.initializer.getText(source) + ')', {
+  compilerOptions: { target: ts.ScriptTarget.ES2022 },
+}).outputText, {
+  offeringStock: { 1: 2, 3: 4 },
+  remainingByVariant: new Map([[1, 14], [2, 12]]),
+  componentDemand: item => item.id === 3
+    ? [{ component_variant_id: 1, quantity: 3 }, { component_variant_id: 2, quantity: 3 }]
+    : [{ component_variant_id: item.id, quantity: 1 }],
+});
+assert.equal(remaining({ id: 1 }), 2, 'Loose pieces must not include pack contents');
+assert.equal(remaining({ id: 2 }), 0, 'Unselected flavors must not appear as loose stock');
+assert.equal(remaining({ id: 3 }), 4, 'Mixed packs must count as packs, not pieces');
+console.log('PASS: Inventory displays 2 loose pieces and 4 mixed packs, not 26 total pieces.');

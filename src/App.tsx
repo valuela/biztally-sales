@@ -1110,12 +1110,14 @@ function StockPage({
   day,
   variants,
   stock,
+  offeringStock,
   reload,
 }: {
   business: Business;
   day: Day | null;
   variants: Variant[];
   stock: Stock[];
+  offeringStock: Record<number, number>;
   reload: () => void;
 }) {
   const [open, setOpen] = useState(false),
@@ -1138,18 +1140,15 @@ function StockPage({
     [editVariant, setEditVariant] = useState(""),
     [editPrice, setEditPrice] = useState(""),
     [editPackQty, setEditPackQty] = useState<Record<number, number>>({}),
-    [error, setError] = useState("");
+    [error, setError] = useState(""),
+    [removingStock, setRemovingStock] = useState(false),
+    [removeVariant, setRemoveVariant] = useState<Variant | null>(null),
+    [removeQuantity, setRemoveQuantity] = useState("1"),
+    [removeReason, setRemoveReason] = useState("returned_home"),
+    [removeError, setRemoveError] = useState(""),
+    [expandedInventory, setExpandedInventory] = useState<Record<number, boolean>>({});
 
-  const stockedVariantIds = new Set(
-    stock
-      .filter((item) => item.brought_quantity > 0)
-      .map((item) => item.variant_id),
-  );
-  const missingToday = day
-    ? variants.filter(
-        (item) => item.is_bundle || !stockedVariantIds.has(item.id),
-      )
-    : [];
+  const missingToday = day ? variants : [];
   const missingTodayGroups = groupVariantsByProduct(missingToday);
   const selectedTodayCount = missingToday.filter(
     (item) => (addQty[item.id] || 0) > 0,
@@ -1157,6 +1156,13 @@ function StockPage({
   const remainingByVariant = new Map(
     stock.map((item) => [item.variant_id, item.brought_quantity]),
   );
+  const sellingRemaining = (item: Variant) => {
+    const recipe = componentDemand(item, 1);
+    return Math.max(0, Math.min(offeringStock[item.id] || 0,
+      recipe.length ? Math.min(...recipe.map(component =>
+        Math.floor((remainingByVariant.get(component.component_variant_id) || 0) / component.quantity))) : 0));
+  };
+  const inventoryGroups = groupVariantsByProduct(variants.filter(item => sellingRemaining(item) > 0));
   const activeCatalogCount = catalog.filter((item) => item.is_active).length;
   const catalogGroups = useMemo(
     () => groupVariantsByProduct(catalog),
@@ -1438,42 +1444,41 @@ function StockPage({
     setAddQty({});
     refresh();
   }
-  async function removeFromToday(item: Stock) {
-    if (!supabase || !day) return;
-    setError("");
-    if (item.brought_quantity < 1)
-      return setError("No remaining stock to remove.");
-    const variant = item.product_variants,
-      label = `${variant.products?.name || "Product"} ${variant.name}`;
-    const answer = window.prompt(
-      "Reason for removing this stock? Type: returned, damaged, or free",
-      "returned",
-    );
-    if (answer === null) return;
-    const reason = answer.trim().toLowerCase();
-    const kinds: Record<string, "returned_home" | "damaged" | "giveaway"> = {
-      returned: "returned_home",
-      damaged: "damaged",
-      free: "giveaway",
+  async function removeFromToday(variant: Variant) {
+    if (!supabase || !day || removingStock) return;
+    setRemoveError("");
+    const quantity = Number(removeQuantity);
+    const remaining = sellingRemaining(variant);
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > remaining)
+      return setRemoveError("Enter a whole number from 1 to " + remaining + ".");
+    const label = `${variant.products?.name || "Product"} ${variant.name}`;
+    const reasons: Record<string, string> = {
+      returned_home: "returned home", damaged: "damaged", giveaway: "given away",
+      correction: "a mistake / correction",
     };
-    if (!kinds[reason])
-      return setError("Use returned, damaged, or free.");
+    if (!reasons[removeReason]) return setRemoveError("Choose a removal reason.");
     if (
       !window.confirm(
-        `Remove ${stockLabel(item.brought_quantity, variant)} of ${label} as ${reason}?`,
+        `Remove ${stockLabel(quantity, variant)} of ${label} as ${reasons[removeReason]}?\n\n${stockLabel(remaining - quantity, variant)} will remain.`,
       )
     )
       return;
-    const { error } = await supabase.from("stock_adjustments").insert({
-      business_id: business.id,
-      selling_day_id: day.id,
-      variant_id: item.variant_id,
-      kind: kinds[reason],
-      quantity_delta: -item.brought_quantity,
-      note: "Removed from selected day's stock as " + reason,
-    });
-    if (error) setError(error.message);
-    else refresh();
+    setRemovingStock(true);
+    try {
+      const { error } = await supabase.rpc("remove_prepared_stock", {
+        p_selling_day_id: day.id, p_variant_id: variant.id,
+        p_quantity: quantity, p_kind: removeReason,
+      });
+      if (error) setRemoveError(error.message);
+      else {
+        setRemoveVariant(null);
+        refresh();
+      }
+    } catch (error) {
+      setRemoveError(error instanceof Error ? error.message : "Unable to remove stock. Refresh and try again.");
+    } finally {
+      setRemovingStock(false);
+    }
   }
 
   async function setVariantActive(variant: Variant, active: boolean) {
@@ -1637,7 +1642,7 @@ function StockPage({
             {showProducts
               ? `${activeCatalogCount} active · ${catalog.length - activeCatalogCount} inactive`
               : day
-                ? "Shared piece stock · add packs anytime."
+                ? "Ready to sell · remaining pieces and packs."
                 : "Products still available."}
           </span>
         </div>
@@ -1658,30 +1663,47 @@ function StockPage({
       {error && <p className="error page-error" role="alert" aria-live="polite">{error}</p>}
       {!showProducts && (
         <>
-      {stock.length ? (
-        <div className="card">
-          {stock.map((s) => {
-            const variant = s.product_variants;
-            return (
-              <div className="row" key={s.id}>
+      {inventoryGroups.length ? (
+        <div className="sell-groups">
+          {inventoryGroups.map((group, index) => {
+            const expanded = expandedInventory[group.id] ?? index === 0;
+            return <div className="sell-product" key={group.id}>
+              <button type="button" className="sell-product-head product-collapse"
+                aria-expanded={expanded} aria-controls={"inventory-" + group.id}
+                onClick={() => setExpandedInventory(current => ({ ...current, [group.id]: !expanded }))}>
+                <i aria-hidden="true">{group.name.slice(0, 1)}</i>
+                <div><h2>{group.name}</h2><span>{group.variants.length} selling options</span></div>
+                <ChevronDown aria-hidden="true" />
+              </button>
+              {expanded && <div id={"inventory-" + group.id}>
+              {group.variants.map(variant => (
+              <div className="row" key={variant.id}>
                 <div>
-                  <b>{variant.products?.name}</b>
+                  <b>{variant.name}</b>
                   <span>
-                    {variant.name} · {unitLabel(variant)}
+                    {unitLabel(variant)} · {php.format(variant.default_price)}
                   </span>
+                  {variant.is_bundle && <small>{bundleContents(variant)}</small>}
                 </div>
                 <div className="stock-actions">
-                  <strong>{stockLabel(s.brought_quantity, variant)} left</strong>
+                  <strong>{sellingRemaining(variant)} {variant.package_quantity === 1 ? "pcs" : "packs"} left</strong>
                   <button
                     className="secondary danger compact"
-                    disabled={!day || s.brought_quantity < 1}
-                    onClick={() => removeFromToday(s)}
+                    disabled={!day || removingStock}
+                    onClick={() => {
+                      setRemoveVariant(variant);
+                      setRemoveQuantity("1");
+                      setRemoveReason("returned_home");
+                      setRemoveError("");
+                    }}
                   >
                     Remove from day
                   </button>
                 </div>
               </div>
-            );
+              ))}
+              </div>}
+            </div>;
           })}
         </div>
       ) : (
@@ -1869,6 +1891,44 @@ function StockPage({
           />
         )}
       </section>
+      )}
+      {removeVariant && (
+        <div className="backdrop">
+          <form className="sheet" role="dialog" aria-modal="true" aria-labelledby="remove-stock-title"
+            onSubmit={event => { event.preventDefault(); void removeFromToday(removeVariant); }}>
+            <div className="sheethead">
+              <h2 id="remove-stock-title">Remove stock</h2>
+              <button type="button" disabled={removingStock} aria-label="Cancel stock removal"
+                onClick={() => setRemoveVariant(null)}><X aria-hidden="true" /></button>
+            </div>
+            <p>{removeVariant.products?.name} · {removeVariant.name} · {unitLabel(removeVariant)}</p>
+            <p>{stockLabel(sellingRemaining(removeVariant), removeVariant)} available</p>
+            <label>
+              How many {removeVariant.package_quantity === 1 ? "pieces" : "packs"}?
+              <input type="number" inputMode="numeric" min="1" step="1"
+                max={sellingRemaining(removeVariant)} required value={removeQuantity}
+                disabled={removingStock} onChange={event => setRemoveQuantity(event.target.value)} />
+            </label>
+            <label>
+              Reason
+              <select value={removeReason} disabled={removingStock}
+                onChange={event => setRemoveReason(event.target.value)}>
+                <option value="returned_home">Returned home</option>
+                <option value="damaged">Damaged</option>
+                <option value="giveaway">Given away / free</option>
+                <option value="correction">Mistake / correction</option>
+              </select>
+            </label>
+            {Number.isInteger(Number(removeQuantity)) && Number(removeQuantity) >= 1 &&
+              Number(removeQuantity) <= sellingRemaining(removeVariant) && (
+                <p>{stockLabel(sellingRemaining(removeVariant) - Number(removeQuantity), removeVariant)} will remain.</p>
+              )}
+            {removeError && <p className="error" role="alert">{removeError}</p>}
+            <button type="submit" className="primary" disabled={removingStock}>
+              {removingStock ? "Removing…" : "Review removal"}
+            </button>
+          </form>
+        </div>
       )}
       {packOpen && (
         <div className="backdrop">
@@ -3253,6 +3313,7 @@ export default function App() {
             day={day}
             variants={variants}
             stock={stock}
+            offeringStock={dayVariantStock}
             reload={() => void load()}
           />
         )}{" "}
