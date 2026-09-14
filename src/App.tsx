@@ -75,6 +75,7 @@ type Sale = {
   payment_method: string | null;
   amount_paid: number;
   sold_at: string;
+  paid_at: string | null;
   voided_at?: string | null;
   void_reason?: string | null;
   sale_items?: SaleItem[];
@@ -121,6 +122,16 @@ const displayDate = (date: string) =>
   new Intl.DateTimeFormat("en-PH", {
     month: "short", day: "numeric", year: "numeric", timeZone: "Asia/Manila",
   }).format(new Date(date + "T12:00:00+08:00"));
+const displayPaymentDate = (date: string) =>
+  new Intl.DateTimeFormat("en-PH", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+    timeZone: "Asia/Manila",
+  }).format(new Date(date));
 const unitLabel = (variant: Pick<Variant, "package_quantity">) =>
   variant.package_quantity === 1 ? "1 pc" : `${variant.package_quantity} pcs`;
 const stockLabel = (
@@ -371,9 +382,8 @@ function StartDay({
         text={saleDate === today() ? "Enter how many pieces or packs you brought." : "Enter the pieces or packs you brought on this date. Today's stock will not change."}
       />
       <div className="sell-groups start-groups">
-        {productGroups.map((group, groupIndex) => {
-          const isExpanded =
-              expandedProducts[group.id] ?? groupIndex === 0,
+        {productGroups.map((group) => {
+          const isExpanded = expandedProducts[group.id] ?? false,
             entered = group.variants.filter(
               (variant) => (q[variant.id] || 0) > 0,
             ).length,
@@ -633,6 +643,7 @@ function Sell({
   reload: () => void;
 }) {
   const [cart, setCart] = useState<Record<number, Cart>>({}),
+    [expandedProducts, setExpandedProducts] = useState<Record<number, boolean>>({}),
     [review, setReview] = useState(false),
     [saleTime, setSaleTime] = useState("12:00"),
     [name, setName] = useState(""),
@@ -771,9 +782,23 @@ function Sell({
         text="Choose a product, then adjust its flavor or pack."
       />
       <div className="sell-groups">
-        {productGroups.map((group) => (
+        {productGroups.map((group) => {
+          const isExpanded = expandedProducts[group.id] ?? false;
+          const contentId = `sale-product-${group.id}`;
+          return (
           <section className="sell-product" key={group.id}>
-            <header className="sell-product-head">
+            <button
+              type="button"
+              className="sell-product-head product-collapse"
+              aria-expanded={isExpanded}
+              aria-controls={contentId}
+              onClick={() =>
+                setExpandedProducts((current) => ({
+                  ...current,
+                  [group.id]: !isExpanded,
+                }))
+              }
+            >
               <i aria-hidden="true">{group.name.slice(0, 1) || "P"}</i>
               <div>
                 <h2>{group.name}</h2>
@@ -782,8 +807,9 @@ function Sell({
                   {group.variants.length === 1 ? "option" : "options"}
                 </span>
               </div>
-            </header>
-            <div className="sell-variants">
+              <ChevronDown className="collapse-chevron" aria-hidden="true" />
+            </button>
+            {isExpanded && <div className="sell-variants" id={contentId}>
               {group.variants.map((v) => {
                 const picked = cart[v.id]?.quantity || 0,
                   remaining = availableFor(v),
@@ -837,9 +863,10 @@ function Sell({
                   </article>
                 );
               })}
-            </div>
+            </div>}
           </section>
-        ))}
+          );
+        })}
       </div>
       {lines.length > 0 && (
         <button type="button" className="cart" aria-label="Review sale" onClick={() => setReview(true)}>
@@ -1115,6 +1142,7 @@ function StockPage({
   stock,
   offeringStock,
   summaryRows,
+  initialCatalog,
   reload,
 }: {
   business: Business;
@@ -1123,7 +1151,8 @@ function StockPage({
   stock: Stock[];
   offeringStock: Record<number, number>;
   summaryRows: DailyStockRow[];
-  reload: () => void;
+  initialCatalog: Variant[];
+  reload: (refreshCatalog?: boolean) => void;
 }) {
   const [open, setOpen] = useState(false),
     [product, setProduct] = useState(""),
@@ -1139,7 +1168,7 @@ function StockPage({
     [addingToday, setAddingToday] = useState(false),
     [expandedAddToday, setExpandedAddToday] = useState<Record<number, boolean>>({}),
     [showProducts, setShowProducts] = useState(false),
-    [catalog, setCatalog] = useState<Variant[]>([]),
+    [catalog, setCatalog] = useState<Variant[]>(initialCatalog),
     [editing, setEditing] = useState<Variant | null>(null),
     [editProduct, setEditProduct] = useState(""),
     [editVariant, setEditVariant] = useState(""),
@@ -1152,6 +1181,7 @@ function StockPage({
     [removeReason, setRemoveReason] = useState("returned_home"),
     [removeError, setRemoveError] = useState(""),
     [expandedInventory, setExpandedInventory] = useState<Record<number, boolean>>({});
+  const [expandedCatalog, setExpandedCatalog] = useState<Record<number, boolean>>({});
 
   const missingToday = day ? variants : [];
   const missingTodayGroups = groupVariantsByProduct(missingToday);
@@ -1190,43 +1220,10 @@ function StockPage({
     0,
   );
 
-  const loadCatalog = useCallback(async () => {
-    if (!supabase) return;
-    const [variantsResult, componentsResult] = await Promise.all([
-      supabase
-        .from("product_variants")
-        .select(
-          "id,product_id,name,package_quantity,default_price,is_active,is_bundle,products(id,name)",
-        )
-        .eq("business_id", business.id)
-        .order("is_active", { ascending: false })
-        .order("name", { ascending: true }),
-      supabase
-        .from("variant_components")
-        .select("bundle_variant_id,component_variant_id,quantity")
-        .eq("business_id", business.id),
-    ]);
-    if (variantsResult.error) return setError(variantsResult.error.message);
-    if (componentsResult.error) return setError(componentsResult.error.message);
-    const items = (variantsResult.data || []) as unknown as Variant[];
-    const rows = (componentsResult.data || []) as VariantComponent[];
-    const byId = new Map(items.map((item) => [item.id, item]));
-    setCatalog(
-      items.map((item) => ({
-        ...item,
-        components: rows
-          .filter((row) => row.bundle_variant_id === item.id)
-          .map((row) => ({ ...row, component: byId.get(row.component_variant_id) })),
-      })),
-    );
-  }, [business.id]);
-  useEffect(() => {
-    void loadCatalog();
-  }, [loadCatalog]);
+  useEffect(() => setCatalog(initialCatalog), [initialCatalog]);
 
-  function refresh() {
-    void loadCatalog();
-    reload();
+  function refresh(refreshCatalog = false) {
+    reload(refreshCatalog);
   }
 
   async function add() {
@@ -1294,7 +1291,7 @@ function StockPage({
     setVariant("");
     setPrice("");
     setTodayQty("0");
-    refresh();
+    refresh(true);
   }
 
   async function addPack() {
@@ -1346,7 +1343,7 @@ function StockPage({
     setPackName("");
     setPackPrice("");
     setPackQty({});
-    refresh();
+    refresh(true);
   }
   async function addSelectedToToday() {
     if (!supabase || !day) return;
@@ -1498,7 +1495,7 @@ function StockPage({
     if (error) setError(error.message);
     else {
       setEditing(null);
-      refresh();
+      refresh(true);
     }
   }
 
@@ -1528,7 +1525,7 @@ function StockPage({
       if (stockError) return setError(stockError.message);
     }
     setEditing(null);
-    refresh();
+    refresh(true);
   }
 
   async function deleteVariant(variant: Variant) {
@@ -1550,7 +1547,7 @@ function StockPage({
       setError(`${error.message}. If this item has history, make it inactive instead.`);
     else {
       setEditing(null);
-      refresh();
+      refresh(true);
     }
   }
 
@@ -1623,7 +1620,7 @@ function StockPage({
     }
     setEditing(null);
     setEditPackQty({});
-    refresh();
+    refresh(true);
   }
   return (
     <section>
@@ -1659,15 +1656,15 @@ function StockPage({
       {day && <DailyStockSummary rows={summaryRows} />}
       {inventoryGroups.length ? (
         <div className="sell-groups">
-          {inventoryGroups.map((group, index) => {
-            const expanded = expandedInventory[group.id] ?? index === 0;
+          {inventoryGroups.map((group) => {
+            const expanded = expandedInventory[group.id] ?? false;
             return <div className="sell-product" key={group.id}>
               <button type="button" className="sell-product-head product-collapse"
                 aria-expanded={expanded} aria-controls={"inventory-" + group.id}
                 onClick={() => setExpandedInventory(current => ({ ...current, [group.id]: !expanded }))}>
                 <i aria-hidden="true">{group.name.slice(0, 1)}</i>
                 <div><h2>{group.name}</h2><span>{group.variants.length} selling options</span></div>
-                <ChevronDown aria-hidden="true" />
+                <ChevronDown className="collapse-chevron" aria-hidden="true" />
               </button>
               {expanded && <div id={"inventory-" + group.id}>
               {group.variants.map(variant => (
@@ -1723,9 +1720,8 @@ function StockPage({
             text="Set quantities, then add everything once."
           />
           <div className="sell-groups start-groups">
-            {missingTodayGroups.map((group, groupIndex) => {
-              const isExpanded =
-                  expandedAddToday[group.id] ?? groupIndex === 0,
+            {missingTodayGroups.map((group) => {
+              const isExpanded = expandedAddToday[group.id] ?? false,
                 entered = group.variants.filter(
                   (variant) => (addQty[variant.id] || 0) > 0,
                 ).length,
@@ -1818,9 +1814,23 @@ function StockPage({
       <section className="block product-manager">
         {catalog.length ? (
           <div className="sell-groups product-list-groups">
-            {catalogGroups.map((group) => (
+            {catalogGroups.map((group) => {
+              const isExpanded = expandedCatalog[group.id] ?? false;
+              const contentId = `catalog-product-${group.id}`;
+              return (
               <section className="sell-product" key={group.id}>
-                <header className="sell-product-head">
+                <button
+                  type="button"
+                  className="sell-product-head product-collapse"
+                  aria-expanded={isExpanded}
+                  aria-controls={contentId}
+                  onClick={() =>
+                    setExpandedCatalog((current) => ({
+                      ...current,
+                      [group.id]: !isExpanded,
+                    }))
+                  }
+                >
                   <i aria-hidden="true">{group.name.slice(0, 1) || "P"}</i>
                   <div>
                     <h2>{group.name}</h2>
@@ -1829,8 +1839,9 @@ function StockPage({
                       {group.variants.length === 1 ? "option" : "options"}
                     </span>
                   </div>
-                </header>
-                <div className="sell-variants">
+                  <ChevronDown className="collapse-chevron" aria-hidden="true" />
+                </button>
+                {isExpanded && <div className="sell-variants" id={contentId}>
                   {group.variants.map((item) => {
                     const remaining = sellingRemaining(item);
                     return (
@@ -1870,9 +1881,10 @@ function StockPage({
                       </article>
                     );
                   })}
-                </div>
+                </div>}
               </section>
-            ))}
+              );
+            })}
           </div>        ) : (
           <Empty
             title="No products yet"
@@ -2284,7 +2296,7 @@ function Reports({ business, userId, initialDate }: { business: Business; userId
     let query = supabase
       .from("sales")
       .select(
-        "id,customer_id,customer_name,total,payment_status,payment_method,amount_paid,sold_at,voided_at,void_reason,sale_items(id,product_name,variant_name,quantity,unit_price,line_total)",
+        "id,customer_id,customer_name,total,payment_status,payment_method,amount_paid,sold_at,paid_at,voided_at,void_reason,sale_items(id,product_name,variant_name,quantity,unit_price,line_total)",
       )
             .eq("business_id", business.id)
       .is("voided_at", null)
@@ -2354,7 +2366,7 @@ function Reports({ business, userId, initialDate }: { business: Business; userId
     return [...items.values()].sort((a, b) => b.quantity - a.quantity).slice(0, 3);
   }, [sales]);
   function exportCsv() {
-    const rows = [["Date", "Customer", "Payment status", "Payment method", "Amount paid", "Balance", "Product", "Variant", "Quantity", "Unit Price", "Total"]];
+    const rows = [["Sale date", "Customer", "Payment status", "Paid on", "Payment method", "Amount paid", "Balance", "Product", "Variant", "Quantity", "Unit Price", "Total"]];
     const groupedSales = new Map<string, Sale[]>();
     for (const sale of sales) {
       const key = sale.customer_id
@@ -2378,6 +2390,7 @@ function Reports({ business, userId, initialDate }: { business: Business; userId
             new Date(sale.sold_at).toLocaleDateString("en-PH"),
             showCustomer ? sale.customer_name || "Unnamed customer" : "",
             salePaymentLabel(sale),
+            sale.paid_at ? displayPaymentDate(sale.paid_at) : "",
             paymentMethodLabel(sale.payment_method),
             String(sale.amount_paid),
             String(balanceDue(sale)),
@@ -2391,7 +2404,7 @@ function Reports({ business, userId, initialDate }: { business: Business; userId
           showCustomer = false;
         }
       }
-      rows.push(["", "", "", "", "", "", "Customer total", "", "", "", String(customerTotal)]);
+      rows.push(["", "", "", "", "", "", "", "Customer total", "", "", "", String(customerTotal)]);
     }
     const csv = rows.map((row) => row.map((value) => '"' + String(value).replace(/"/g, '""') + '"').join(",")).join("\n");
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
@@ -2746,6 +2759,17 @@ function Reports({ business, userId, initialDate }: { business: Business; userId
                     )}
                   </div>
                 </div>
+                {sale.payment_status === "paid" && sale.paid_at && (
+                  <div className="payment-record">
+                    <CheckCircle2 aria-hidden="true" />
+                    <span>
+                      Paid <strong>{displayPaymentDate(sale.paid_at)}</strong>
+                      {sale.payment_method && (
+                        <small>via {paymentMethodLabel(sale.payment_method)}</small>
+                      )}
+                    </span>
+                  </div>
+                )}
                 <div className="report-items">
                   {(sale.sale_items || []).map((item) => (
                     <div key={item.id}>
@@ -2903,6 +2927,7 @@ export default function App() {
     [loading, setLoading] = useState(true),
     [business, setBusiness] = useState<Business | null>(null),
     [variants, setVariants] = useState<Variant[]>([]),
+    [catalogVariants, setCatalogVariants] = useState<Variant[]>([]),
     [day, setDay] = useState<Day | null>(null),
     [activeDate, setActiveDate] = useState(today),
     [loadedDate, setLoadedDate] = useState<string | null>(null),
@@ -2919,6 +2944,7 @@ export default function App() {
     [settingsError, setSettingsError] = useState("");
   const loadVersion = useRef(0);
   const activeDateRef = useRef(activeDate);
+  const catalogCache = useRef<{ businessId: number; variants: Variant[]; components: VariantComponent[] } | null>(null);
   const loadBusiness = useCallback(async () => {
     if (!supabase) return null;
     const { data } = await supabase
@@ -2931,7 +2957,7 @@ export default function App() {
     return b;
   }, []);
   const load = useCallback(
-    async (arg?: Business | null) => {
+    async (arg?: Business | null, refreshCatalog = false) => {
       if (!supabase) return;
       if (activeDate !== activeDateRef.current) return;
       const b = arg || business;
@@ -2939,8 +2965,9 @@ export default function App() {
       const version = ++loadVersion.current;
       setLoadError("");
       try {
+      const cached = !refreshCatalog && catalogCache.current?.businessId === b.id ? catalogCache.current : null;
       const [v, d, componentResult] = await Promise.all([
-        supabase
+        cached ? Promise.resolve({ data: cached.variants, error: null }) : supabase
           .from("product_variants")
           .select(
             "id,product_id,name,package_quantity,default_price,is_active,is_bundle,products(id,name)",
@@ -2948,11 +2975,11 @@ export default function App() {
           .eq("business_id", b.id),
         supabase
           .from("selling_days")
-          .select("*")
+          .select("id,sale_date,status,closed_at")
           .eq("business_id", b.id)
           .eq("sale_date", activeDate)
           .maybeSingle(),
-        supabase
+        cached ? Promise.resolve({ data: cached.components, error: null }) : supabase
           .from("variant_components")
           .select("bundle_variant_id,component_variant_id,quantity")
           .eq("business_id", b.id),
@@ -2966,6 +2993,7 @@ export default function App() {
         component_variant_id: number;
         quantity: number;
       }[];
+      if (!cached) catalogCache.current = { businessId: b.id, variants: rawVariants, components: componentRows };
       const byId = new Map(rawVariants.map((item) => [item.id, item]));
       const enrichedVariants = rawVariants.map((item) => ({
         ...item,
@@ -2976,17 +3004,15 @@ export default function App() {
             component: byId.get(component.component_variant_id),
           })),
       }));
+      setCatalogVariants(enrichedVariants);
       setVariants(enrichedVariants.filter(item => item.is_active));
       setDay(d.data as Day | null);
       if (d.data) {
         const [s, sold, adjusted, offered] = await Promise.all([
           supabase
             .from("daily_stock")
-            .select(
-              "id,variant_id,brought_quantity,product_variants!inner(id,product_id,name,package_quantity,default_price,is_active,is_bundle,products(id,name))",
-            )
-            .eq("selling_day_id", d.data.id)
-            .eq("product_variants.is_active", true),
+            .select("id,variant_id,brought_quantity")
+            .eq("selling_day_id", d.data.id),
           supabase
             .from("sale_items")
             .select(
@@ -3037,16 +3063,18 @@ export default function App() {
             row.variant_id,
             (adjustedByVariant.get(row.variant_id) || 0) + row.quantity_delta,
           );
-        const available = ((s.data || []) as unknown as Stock[]).map((row) => ({
-          ...row,
-          initial_quantity: row.brought_quantity,
-          brought_quantity: Math.max(
-            0,
-            row.brought_quantity +
+        const available = (s.data || []).flatMap((row) => {
+          const variant = byId.get(Number(row.variant_id));
+          if (!variant?.is_active) return [];
+          return [{
+            ...row,
+            product_variants: variant,
+            initial_quantity: row.brought_quantity,
+            brought_quantity: Math.max(0, row.brought_quantity +
               (adjustedByVariant.get(row.variant_id) || 0) -
-              (soldByVariant.get(row.variant_id) || 0),
-          ),
-        }));
+              (soldByVariant.get(row.variant_id) || 0)),
+          } as Stock];
+        });
         setStock(available);
         setDaySummaryRows((offered.data || []).map(item => {
           const variant = byId.get(Number(item.variant_id));
@@ -3309,7 +3337,8 @@ export default function App() {
             stock={stock}
             offeringStock={dayVariantStock}
             summaryRows={daySummaryRows}
-            reload={() => void load()}
+            initialCatalog={catalogVariants}
+            reload={(refreshCatalog) => void load(undefined, refreshCatalog)}
           />
         )}{" "}
         {tab === "reports" && (

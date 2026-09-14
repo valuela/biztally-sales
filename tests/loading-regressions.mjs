@@ -115,3 +115,22 @@ assert.equal(counts('sold'), '2 pcs · 6 packs');
 assert.match(source.text, /<DailyStockSummary rows={summaryRows}/);
 assert.match(source.text, /<DailyStockSummary rows={daySummaryRows}/);
 console.log('PASS: shared Sell/Inventory summary totals keep pieces and packs separate.');
+
+const stockPage = functions.find(node => node.name?.text === 'StockPage');
+assert.doesNotMatch(stockPage.getText(source), /const loadCatalog =|void loadCatalog\(\)/,
+  'Stock must reuse the App catalog instead of downloading it again');
+assert.match(source.text, /cached \? Promise\.resolve\(\{ data: cached\.variants/);
+assert.match(source.text, /cached \? Promise\.resolve\(\{ data: cached\.components/);
+assert.match(source.text, /from\("selling_days"\)[\s\S]{0,100}select\("id,sale_date,status,closed_at"\)/);
+assert.match(source.text, /from\("daily_stock"\)[\s\S]{0,100}select\("id,variant_id,brought_quantity"\)/);
+console.log('PASS: catalog/recipes are cached, Stock has no duplicate catalog load, and daily payloads are narrow.');
+
+assert.doesNotMatch(source.text, /\?\?\s*(groupIndex|index)\s*===\s*0/);
+assert.match(source.text, /sale-product-\$\{group\.id\}/);
+assert.match(source.text, /catalog-product-\$\{group\.id\}/);
+console.log('PASS: every grouped product view starts collapsed, including New Sale and Product List.');
+
+assert.match(source.text, /sold_at,paid_at,voided_at/);
+assert.match(source.text, /className="payment-record"/);
+assert.match(source.text, /displayPaymentDate\(sale\.paid_at\)/);
+console.log('PASS: paid report transactions show their actual payment date and time.');

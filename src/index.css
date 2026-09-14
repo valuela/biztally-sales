@@ -657,8 +657,10 @@ select:focus {
   padding: 48px 20px;
 }
 .empty > svg {
+  display: block;
   width: 52px;
   height: 52px;
+  margin: 0 auto;
   padding: 13px;
   background: #f9e3ec;
   color: #a52e60;
@@ -1727,6 +1729,43 @@ select:focus {
 .report-order-head strong {
   font-size: 15px;
   font-variant-numeric: tabular-nums;
+}
+
+.payment-record {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid #cfe9da;
+  border-radius: 11px;
+  background: #f1faf5;
+  color: #216f4a;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.payment-record > svg {
+  width: 17px;
+  height: 17px;
+  flex: 0 0 17px;
+}
+
+.payment-record > span {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 4px;
+}
+
+.payment-record strong {
+  font-weight: 800;
+}
+
+.payment-record small {
+  color: #517563;
+  font-size: 11px;
 }
 
 .payment-pill {
